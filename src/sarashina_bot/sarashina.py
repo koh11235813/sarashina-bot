@@ -33,12 +33,12 @@ class _RateLimiter:
         self._times: deque[float] = deque()
         self._lock = asyncio.Lock()
 
-    async def acquire(self) -> None:
+    async def acquire(self, require: int = 1) -> None:
         async with self._lock:
             now = self._clock()
             while self._times and now - self._times[0] >= 60:
                 self._times.popleft()
-            if len(self._times) >= self._rpm:
+            if len(self._times) + require > self._rpm:
                 raise RateLimitExceeded("rate limit exceeded")
             self._times.append(now)
 
@@ -68,13 +68,22 @@ class SarashinaClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def chat(self, messages: list[dict[str, str]]) -> str:
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        *,
+        require_slots: int = 1,
+    ) -> dict:
         # The retry below must not consume a second limiter slot.
-        await self._limiter.acquire()
-        return await self._request(messages)
+        await self._limiter.acquire(require_slots)
+        return await self._request(messages, tools)
 
-    async def _request(self, messages: list[dict[str, str]]) -> str:
+    async def _request(self, messages: list[dict], tools: list[dict] | None) -> dict:
         body = {"model": self._model, "messages": messages}
+        if tools is not None:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
         log.debug("sarashina request: %s", json.dumps(body, ensure_ascii=False))
         response = await self._post(body)
         if response.status_code == 429:
@@ -85,7 +94,11 @@ class SarashinaClient:
         if response.status_code >= 400:
             raise SarashinaError(_error_message(response), response.status_code)
         data = response.json()
-        return data["choices"][0]["message"]["content"]
+        message = data["choices"][0]["message"]
+        result = {"role": "assistant", "content": message.get("content") or ""}
+        if message.get("tool_calls"):
+            result["tool_calls"] = message["tool_calls"]
+        return result
 
     async def _post(self, body: dict) -> httpx.Response:
         try:

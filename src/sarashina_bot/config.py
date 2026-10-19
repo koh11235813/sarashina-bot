@@ -13,6 +13,7 @@ DEFAULT_SYSTEM_PROMPT = (
 class Config:
     discord_token: str
     api_key: str
+    exa_api_key: str
     model: str = "sarashina3-mini"
     context_message_count: int = 10
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
@@ -26,6 +27,7 @@ class Config:
         return cls(
             discord_token=_required("DISCORD_TOKEN"),
             api_key=_required("SARASHINA_API_KEY"),
+            exa_api_key=_required("EXA_API_KEY"),
             model=os.getenv("SARASHINA_MODEL", "sarashina3-mini"),
             context_message_count=int(os.getenv("CONTEXT_MESSAGE_COUNT", "10")),
             system_prompt=os.getenv("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT),
