@@ -55,6 +55,8 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
 - クライアント側にスライディングウィンドウ（直近 60 秒）のリミッタを置く（`RATE_LIMIT_RPM`、既定 30）。
   スライディングウィンドウは同じ上限の固定ウィンドウより厳しいので、リミッタを通る限りどの 1 分間でも上限を超えない
 - リミッタはプロセス内のみでよい（単一レプリカ構成のため）
+- 翻訳（sarashina3-translate）はチャットのモデルとは別枠の 30 RPM なので、クライアント側にも翻訳専用のリミッタを
+  別に置く（上限は同じ `RATE_LIMIT_RPM`）。翻訳がチャットの枠を食わず、チャットも翻訳の枠を食わない
 - 429 は再試行しない。固定ウィンドウなので、次のウィンドウまで待たない再試行は同じく弾かれる
 - リミッタで止めたときは必要な空きができるまでの秒数、429 のときは `Retry-After` の秒数
   （ヘッダーが無い・読めないときは 60 秒）を使い、ユーザーに「{x}秒後にもう一度送信してください。」と返す。
@@ -111,6 +113,13 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
   使える人と ephemeral は `/model` と同じ。起動直後は未指定で、そのあいだは `reasoning_effort` を送らない
 - 指定した effort は `/model` で切り替えても残り、sarashina3.2-mini-thinking に戻すとまた効く
 - 切り替えはプロセス内だけで、Pod が作り直されると `SARASHINA_MODEL` と effort 未指定に戻る
+- `/translate source text`: `source`（`ja` / `en`）の文章 `text` をもう一方の言語に翻訳する（`POST /v1/translate`）。
+  `text` は 1〜5,000 文字で、超える入力は Discord 側で弾く。使える人は `/model` と同じで、
+  ほかの人には「翻訳する権限がありません。」と本人にだけ見える返事をする。
+  翻訳は 3 秒を超えうるので defer してから返し、返事は全員に見える形で翻訳文だけを送る（原文は付けない）。
+  2,000 文字を超えたら分割して送る。レート制限は「{x}秒後にもう一度送信してください。」、
+  それ以外の失敗は「翻訳に失敗しました。」と返す（API のエラー内容は Discord に出さずログに残す）。
+  ログに残すのは元の言語と文字数だけで、文章そのものは出さない。翻訳は会話履歴にもモデルのツールにも入れない
 - コマンドは起動のたびに `tree.sync()` でグローバルに登録する
 
 ## 設定・シークレット
@@ -121,12 +130,12 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
 | `SARASHINA_API_KEY` | k3s Secret |
 | `SARASHINA_MODEL`（既定 sarashina3-mini） | ConfigMap |
 | `SARASHINA_MODELS`（`/model` の選択肢、カンマ区切り。`SARASHINA_MODEL` を含める） | ConfigMap |
-| `DISCORD_ALLOWED_USERS`（ターミナルと `/model`・`/effort` を使える Discord ユーザー ID、カンマ区切り） | k3s Secret |
+| `DISCORD_ALLOWED_USERS`（ターミナルと `/model`・`/effort`・`/translate` を使える Discord ユーザー ID、カンマ区切り） | k3s Secret |
 | `SANDBOX_URL`（既定 `http://sandbox:8080`） | ConfigMap |
 | `MAX_TOOL_ROUNDS`（既定 2。`+ 1` が `RATE_LIMIT_RPM` 以下） | ConfigMap |
 | `CONTEXT_MESSAGE_COUNT`（既定 10） | ConfigMap |
 | `SYSTEM_PROMPT` | ConfigMap |
-| `RATE_LIMIT_RPM`（既定 30。sarashina3-mini・sarashina3.2-mini-thinking の上限） | ConfigMap |
+| `RATE_LIMIT_RPM`（既定 30。sarashina3-mini・sarashina3.2-mini-thinking の上限。翻訳のリミッタにも別枠で同じ値を使う） | ConfigMap |
 
 ## k3s デプロイ仕様
 
@@ -140,8 +149,8 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
 
 ## 非目標（スコープ外）
 
-- `/model`・`/effort` 以外のスラッシュコマンド、ボタン/選択 UI
-- Embeddings / Rerank / Translate エンドポイントの利用
+- `/model`・`/effort`・`/translate` 以外のスラッシュコマンド、ボタン/選択 UI
+- Embeddings / Rerank エンドポイントの利用
 - 会話履歴のデータベース保存
 - モデレーション（sarashina3-guard）
 
