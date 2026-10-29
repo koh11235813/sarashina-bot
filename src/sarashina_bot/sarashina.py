@@ -95,7 +95,16 @@ class SarashinaClient:
         if response.status_code >= 400:
             raise SarashinaError(_error_message(response), response.status_code)
         data = response.json()
-        message = data["choices"][0]["message"]
+        choice = data["choices"][0]
+        message = choice["message"]
+        tool_calls = message.get("tool_calls") or []
+        # Content and arguments carry the Discord conversation, so they stay out of the pod logs.
+        log.info(
+            "sarashina response: finish_reason=%s tool_calls=%d names=%s",
+            choice.get("finish_reason"),
+            len(tool_calls),
+            [call["function"]["name"] for call in tool_calls],
+        )
         result = {"role": "assistant", "content": message.get("content") or ""}
         if message.get("tool_calls"):
             result["tool_calls"] = message["tool_calls"]

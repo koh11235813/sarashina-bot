@@ -100,7 +100,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._reply(400, {"error": "body must be {\"command\": str}"})
             return
         log.info("run: %s", command)
-        self._reply(200, asdict(run_command(command)))
+        try:
+            result = run_command(command)
+        except (OSError, ValueError) as exc:
+            # Without a reply, socketserver just drops the connection and the bot never learns why.
+            log.warning("run failed: %s", exc)
+            self._reply(500, {"error": str(exc)})
+            return
+        self._reply(200, asdict(result))
 
     def _reply(self, status: int, body: dict) -> None:
         data = json.dumps(body, ensure_ascii=False).encode()

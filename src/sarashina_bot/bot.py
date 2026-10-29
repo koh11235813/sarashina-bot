@@ -39,6 +39,8 @@ RUN_COMMAND_TOOL = {
             "Linux のサンドボックス（一般ユーザー権限、作業ディレクトリ /work）で bash の"
             "コマンドを実行し、終了コードと標準出力・標準エラーを返します。"
             "30 秒で打ち切られ、バックグラウンドのプロセスは残りません。"
+            "ユーザーにコマンドの実行・計算・ファイル操作・実行環境の確認を頼まれたときは、"
+            "実行できないと答えずにこのツールを使ってください。"
         ),
         "parameters": {
             "type": "object",
@@ -61,6 +63,10 @@ class HistoryMessage:
     id: int
     name: str
     content: str
+    author_id: int
+    # True only for this bot's own messages, not for other bots.
+    is_bot: bool
+    reply_to_author_id: int | None
 
 
 def build_messages(
@@ -68,21 +74,57 @@ def build_messages(
     trigger: HistoryMessage,
     system_prompt: str,
 ) -> list[dict[str, str]]:
-    """Build the chat payload from oldest-first history plus the trigger message."""
-    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    """Build the chat payload from oldest-first history plus the trigger message.
+
+    Only the trigger author's messages and this bot's replies to them are kept.
+    """
+    messages: list[dict[str, str]] = [
+        {
+            "role": "system",
+            "content": f"{system_prompt}\n\n話しかけているのは{trigger.name}さんです。",
+        }
+    ]
     seen: set[int] = set()
+    # Later chunks of a split reply are sent without a reference, so they inherit
+    # the decision for the chunk right before them in the unfiltered window.
+    in_kept_reply = False
     for message in history:
-        if message.id == trigger.id or message.id in seen:
+        if not message.is_bot:
+            keep = message.author_id == trigger.author_id
+            in_kept_reply = False
+        elif message.reply_to_author_id is None:
+            keep = in_kept_reply
+        else:
+            keep = message.reply_to_author_id == trigger.author_id
+            in_kept_reply = keep
+        if not keep or message.id == trigger.id or message.id in seen:
             continue
         seen.add(message.id)
         if not message.content:
             continue
-        messages.append(
-            {"role": "user", "content": f"{message.name}: {message.content}"}
-        )
+        role = "assistant" if message.is_bot else "user"
+        # The docs do not say whether the first turn may be the assistant's; a reply
+        # whose question fell out of the window is dropped rather than risk it.
+        if role == "assistant" and len(messages) == 1:
+            continue
+        messages.append({"role": role, "content": message.content})
     if trigger.content:
-        messages.append({"role": "user", "content": f"{trigger.name}: {trigger.content}"})
+        messages.append({"role": "user", "content": trigger.content})
     return messages
+
+
+# Snowflakes are never 0, so this matches no one. None would mean "not a reply",
+# and build_messages would then take the message as a split reply's continuation.
+_UNKNOWN_AUTHOR_ID = 0
+
+
+def _reply_to_author_id(message: discord.Message, authors: dict[int, int]) -> int | None:
+    reference = message.reference
+    if reference is None:
+        return None
+    if isinstance(reference.resolved, discord.Message):
+        return reference.resolved.author.id
+    return authors.get(reference.message_id, _UNKNOWN_AUTHOR_ID)
 
 
 def split_message(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
@@ -219,6 +261,18 @@ class SarashinaBot(discord.Client):
     async def setup_hook(self) -> None:
         await self.tree.sync()
 
+    def _history_message(
+        self, message: discord.Message, authors: dict[int, int]
+    ) -> HistoryMessage:
+        return HistoryMessage(
+            id=message.id,
+            name=message.author.display_name,
+            content=message.clean_content,
+            author_id=message.author.id,
+            is_bot=message.author.id == self.user.id,
+            reply_to_author_id=_reply_to_author_id(message, authors),
+        )
+
     async def on_message(self, message: discord.Message) -> None:
         if message.author.id == self.user.id:
             return
@@ -234,17 +288,9 @@ class SarashinaBot(discord.Client):
             ]
             # history() yields newest-first; the model needs oldest-first.
             history.reverse()
-            records = [
-                HistoryMessage(
-                    id=m.id, name=m.author.display_name, content=m.clean_content
-                )
-                for m in history
-            ]
-            trigger = HistoryMessage(
-                id=message.id,
-                name=message.author.display_name,
-                content=message.clean_content,
-            )
+            authors = {m.id: m.author.id for m in history}
+            records = [self._history_message(m, authors) for m in history]
+            trigger = self._history_message(message, authors)
             payload = build_messages(records, trigger, self._config.system_prompt)
 
             async with message.channel.typing():

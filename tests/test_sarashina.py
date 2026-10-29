@@ -1,4 +1,5 @@
 import json
+import logging
 
 import httpx
 import pytest
@@ -172,3 +173,60 @@ async def test_require_slots_checks_free_slots_up_front():
         await client.chat([{"role": "user", "content": "yo"}], require_slots=2)
     result = await client.chat([{"role": "user", "content": "yo"}], require_slots=1)
     assert result["content"] == "ok"
+
+
+async def test_response_metadata_is_logged_without_content(caplog):
+    tool_calls = [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "run_command", "arguments": '{"command": "secret-arg"}'},
+        }
+    ]
+
+    async def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": "secret-content",
+                            "tool_calls": tool_calls,
+                        },
+                    }
+                ]
+            },
+        )
+
+    client = make_client(handler)
+    with caplog.at_level(logging.INFO, logger="sarashina_bot.sarashina"):
+        await client.chat([{"role": "user", "content": "yo"}], tools=TOOLS)
+
+    logged = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.INFO)
+    assert "finish_reason=tool_calls" in logged
+    assert "run_command" in logged
+    assert "secret-content" not in logged
+    assert "secret-arg" not in logged
+
+
+async def test_response_without_tool_calls_is_logged(caplog):
+    async def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": "secret-content"}}
+                ]
+            },
+        )
+
+    client = make_client(handler)
+    with caplog.at_level(logging.INFO, logger="sarashina_bot.sarashina"):
+        await client.chat([{"role": "user", "content": "yo"}])
+
+    logged = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.INFO)
+    assert "finish_reason=stop" in logged
+    assert "secret-content" not in logged

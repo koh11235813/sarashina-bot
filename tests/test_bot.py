@@ -1,9 +1,11 @@
 import json
+from types import SimpleNamespace
 
 from sarashina_bot.bot import (
     RUN_COMMAND_TOOL,
     WEB_SEARCH_TOOL,
     HistoryMessage,
+    _reply_to_author_id,
     build_messages,
     generate_reply,
     handle_model_command,
@@ -14,42 +16,174 @@ from sarashina_bot.exa import ExaError
 from sarashina_bot.terminal import TerminalError
 
 
-def rec(id, name, content):
-    return HistoryMessage(id=id, name=name, content=content)
+USER_ID = 1
+OTHER_ID = 2
+BOT_ID = 100
 
 
-def test_system_prompt_is_first():
-    out = build_messages([rec(1, "a", "one")], rec(2, "b", "two"), "sys")
-    assert out[0] == {"role": "system", "content": "sys"}
+def user(id, content, author_id=USER_ID, name="u"):
+    return HistoryMessage(
+        id=id,
+        name=name,
+        content=content,
+        author_id=author_id,
+        is_bot=False,
+        reply_to_author_id=None,
+    )
+
+
+def bot(id, content, reply_to):
+    return HistoryMessage(
+        id=id,
+        name="sarashina",
+        content=content,
+        author_id=BOT_ID,
+        is_bot=True,
+        reply_to_author_id=reply_to,
+    )
+
+
+def reply_to_missing():
+    # A reply whose target was deleted or is outside the fetched window.
+    return SimpleNamespace(reference=SimpleNamespace(resolved=None, message_id=999))
+
+
+def contents(out):
+    return [m["content"] for m in out[1:]]
+
+
+def test_system_prompt_is_first_and_names_addressee():
+    out = build_messages([user(1, "one")], user(2, "two", name="Alice"), "sys")
+    assert out[0]["role"] == "system"
+    assert out[0]["content"].startswith("sys")
+    assert "Aliceさん" in out[0]["content"]
 
 
 def test_ordering_is_preserved_and_trigger_last():
-    history = [rec(1, "a", "one"), rec(2, "b", "two")]
-    out = build_messages(history, rec(2, "b", "two"), "sys")
-    assert [m["content"] for m in out[1:]] == ["a: one", "b: two"]
+    history = [user(1, "one"), user(2, "two")]
+    out = build_messages(history, user(2, "two"), "sys")
+    assert contents(out) == ["one", "two"]
 
 
 def test_trigger_appended_when_absent_from_history():
-    history = [rec(1, "a", "one")]
-    out = build_messages(history, rec(9, "z", "hey"), "sys")
-    assert out[-1] == {"role": "user", "content": "z: hey"}
+    history = [user(1, "one")]
+    out = build_messages(history, user(9, "hey"), "sys")
+    assert out[-1] == {"role": "user", "content": "hey"}
 
 
 def test_duplicate_ids_are_deduped():
-    history = [rec(1, "a", "one"), rec(1, "a", "one"), rec(2, "b", "two")]
-    out = build_messages(history, rec(3, "c", "three"), "sys")
-    assert [m["content"] for m in out[1:]] == ["a: one", "b: two", "c: three"]
+    history = [user(1, "one"), user(1, "one"), user(2, "two")]
+    out = build_messages(history, user(3, "three"), "sys")
+    assert contents(out) == ["one", "two", "three"]
 
 
 def test_empty_content_is_skipped():
-    history = [rec(1, "a", ""), rec(2, "b", "two")]
-    out = build_messages(history, rec(3, "c", "three"), "sys")
-    assert [m["content"] for m in out[1:]] == ["b: two", "c: three"]
+    history = [user(1, ""), user(2, "two")]
+    out = build_messages(history, user(3, "three"), "sys")
+    assert contents(out) == ["two", "three"]
 
 
 def test_empty_trigger_is_not_appended():
-    out = build_messages([rec(1, "a", "one")], rec(2, "b", ""), "sys")
-    assert [m["content"] for m in out[1:]] == ["a: one"]
+    out = build_messages([user(1, "one")], user(2, ""), "sys")
+    assert contents(out) == ["one"]
+
+
+def test_other_humans_are_excluded():
+    history = [user(1, "mine"), user(2, "theirs", author_id=OTHER_ID)]
+    out = build_messages(history, user(3, "now"), "sys")
+    assert contents(out) == ["mine", "now"]
+
+
+def test_bot_replies_to_other_humans_are_excluded():
+    history = [
+        user(1, "q"),
+        bot(2, "to them", reply_to=OTHER_ID),
+        bot(3, "to me", reply_to=USER_ID),
+    ]
+    out = build_messages(history, user(4, "now"), "sys")
+    assert contents(out) == ["q", "to me", "now"]
+
+
+def test_roles_have_no_name_prefix():
+    history = [user(1, "q", name="Alice"), bot(2, "a", reply_to=USER_ID)]
+    out = build_messages(history, user(3, "now", name="Alice"), "sys")
+    assert out[1:] == [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "a"},
+        {"role": "user", "content": "now"},
+    ]
+
+
+def test_continuation_after_kept_reply_is_kept():
+    history = [
+        user(1, "q"),
+        bot(2, "part1", reply_to=USER_ID),
+        bot(3, "part2", reply_to=None),
+        bot(4, "part3", reply_to=None),
+    ]
+    out = build_messages(history, user(5, "now"), "sys")
+    assert contents(out) == ["q", "part1", "part2", "part3", "now"]
+
+
+def test_continuation_after_reply_to_someone_else_is_dropped():
+    history = [
+        user(1, "q"),
+        bot(2, "part1", reply_to=OTHER_ID),
+        bot(3, "part2", reply_to=None),
+    ]
+    out = build_messages(history, user(4, "now"), "sys")
+    assert contents(out) == ["q", "now"]
+
+
+def test_continuation_chain_is_broken_by_a_human_message():
+    history = [
+        user(1, "q"),
+        bot(2, "part1", reply_to=USER_ID),
+        user(3, "chatter", author_id=OTHER_ID),
+        bot(4, "orphan", reply_to=None),
+    ]
+    out = build_messages(history, user(5, "now"), "sys")
+    assert contents(out) == ["q", "part1", "now"]
+
+
+def test_reply_to_unknown_author_is_not_a_continuation():
+    history = [
+        user(1, "q"),
+        bot(2, "part1", reply_to=USER_ID),
+        bot(3, "to someone", reply_to=_reply_to_author_id(reply_to_missing(), {})),
+    ]
+    out = build_messages(history, user(4, "now"), "sys")
+    assert contents(out) == ["q", "part1", "now"]
+
+
+def test_reply_to_author_id():
+    authors = {10: OTHER_ID}
+    assert _reply_to_author_id(SimpleNamespace(reference=None), authors) is None
+    in_window = SimpleNamespace(
+        reference=SimpleNamespace(resolved=None, message_id=10)
+    )
+    assert _reply_to_author_id(in_window, authors) == OTHER_ID
+    unknown = _reply_to_author_id(reply_to_missing(), authors)
+    assert unknown is not None
+    assert unknown not in (USER_ID, OTHER_ID, BOT_ID)
+
+
+def test_continuation_at_window_start_is_dropped():
+    history = [bot(1, "orphan", reply_to=None), user(2, "q")]
+    out = build_messages(history, user(3, "now"), "sys")
+    assert contents(out) == ["q", "now"]
+
+
+def test_leading_assistant_messages_are_dropped():
+    # The user message these answered fell out of the window.
+    history = [
+        bot(1, "part1", reply_to=USER_ID),
+        bot(2, "part2", reply_to=None),
+        user(3, "q"),
+    ]
+    out = build_messages(history, user(4, "now"), "sys")
+    assert out[1] == {"role": "user", "content": "q"}
+    assert contents(out) == ["q", "now"]
 
 
 def test_split_short_text():
