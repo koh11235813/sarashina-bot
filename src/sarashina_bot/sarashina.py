@@ -117,6 +117,8 @@ class SarashinaClient:
         result = {"role": "assistant", "content": message.get("content") or ""}
         if message.get("tool_calls"):
             result["tool_calls"] = message["tool_calls"]
+        # Not a message field: callers must not send it back in the next request.
+        result["finish_reason"] = choice.get("finish_reason")
         return result
 
     async def _post(self, body: dict) -> httpx.Response:

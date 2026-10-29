@@ -283,8 +283,8 @@ async def reply(sarashina, exa=None, terminal=None, *, allow_terminal=False, max
     )
 
 
-def text(content):
-    return {"role": "assistant", "content": content}
+def text(content, finish_reason="stop"):
+    return {"role": "assistant", "content": content, "finish_reason": finish_reason}
 
 
 def tool_call(id, arguments, name="web_search"):
@@ -498,6 +498,47 @@ async def test_loop_ends_when_model_stops_calling_tools():
     assert answer == "enough"
     assert len(sarashina.calls) == 2
     assert sarashina.calls[1]["tools"] == [WEB_SEARCH_TOOL, RUN_COMMAND_TOOL]
+
+
+LENGTH_MESSAGE = "回答が出せませんでした。effort を下げてください。"
+
+
+async def test_empty_answer_cut_by_length_asks_to_lower_effort():
+    sarashina = FakeSarashina(text("", finish_reason="length"))
+
+    assert await reply(sarashina) == LENGTH_MESSAGE
+
+
+async def test_empty_forced_answer_cut_by_length_asks_to_lower_effort():
+    sarashina = FakeSarashina(
+        wants_tools(tool_call("call-1", search_args("q"))),
+        text("", finish_reason="length"),
+    )
+
+    assert await reply(sarashina) == LENGTH_MESSAGE
+
+
+async def test_answer_cut_by_length_is_kept_when_not_empty():
+    sarashina = FakeSarashina(text("partial", finish_reason="length"))
+
+    assert await reply(sarashina) == "partial"
+
+
+async def test_empty_answer_for_other_reasons_stays_empty():
+    sarashina = FakeSarashina(text(""))
+
+    assert await reply(sarashina) == ""
+
+
+async def test_finish_reason_is_not_sent_back_to_the_api():
+    call = tool_call("call-1", search_args("q"))
+    sarashina = FakeSarashina(
+        {**wants_tools(call), "finish_reason": "tool_calls"}, text("ok")
+    )
+
+    await reply(sarashina)
+
+    assert all("finish_reason" not in m for m in sarashina.calls[1]["messages"])
 
 
 class FakeModelHolder:

@@ -192,13 +192,30 @@ async def test_tool_calls_are_returned():
     client = make_client(handler)
     result = await client.chat([{"role": "user", "content": "yo"}], tools=TOOLS)
 
-    assert result == {"role": "assistant", "content": "", "tool_calls": tool_calls}
+    assert result == {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": tool_calls,
+        "finish_reason": None,
+    }
 
 
 async def test_no_tool_calls_key_when_absent():
     client = make_client(lambda request: ok("hi"))
     result = await client.chat([{"role": "user", "content": "yo"}])
-    assert result == {"role": "assistant", "content": "hi"}
+    assert result == {"role": "assistant", "content": "hi", "finish_reason": None}
+
+
+async def test_finish_reason_is_returned():
+    async def handler(request):
+        return httpx.Response(
+            200,
+            json={"choices": [{"finish_reason": "length", "message": {"content": ""}}]},
+        )
+
+    client = make_client(handler)
+    result = await client.chat([{"role": "user", "content": "yo"}])
+    assert result["finish_reason"] == "length"
 
 
 async def test_null_content_becomes_empty_string():
