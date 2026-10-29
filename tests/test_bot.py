@@ -1,4 +1,5 @@
 import json
+import logging
 from types import SimpleNamespace
 
 from sarashina_bot.bot import (
@@ -10,12 +11,17 @@ from sarashina_bot.bot import (
     generate_reply,
     handle_effort_command,
     handle_model_command,
+    handle_translate_command,
     rate_limited_message,
     split_message,
 )
 from sarashina_bot.config import Config
 from sarashina_bot.exa import ExaError
-from sarashina_bot.sarashina import REASONING_EFFORT_MODEL
+from sarashina_bot.sarashina import (
+    REASONING_EFFORT_MODEL,
+    RateLimitExceeded,
+    SarashinaError,
+)
 from sarashina_bot.terminal import TerminalError
 
 
@@ -611,3 +617,94 @@ def test_effort_command_refuses_others():
 
 def test_rate_limited_message_tells_when_to_retry():
     assert rate_limited_message(12) == "12秒後にもう一度送信してください。"
+
+
+class FakeTranslator:
+    def __init__(self, result="", error=None):
+        self._result = result
+        self._error = error
+        self.calls = []
+
+    async def translate(self, text, source_lang, target_lang):
+        self.calls.append((text, source_lang, target_lang))
+        if self._error:
+            raise self._error
+        return self._result
+
+
+async def test_translate_command_refuses_others():
+    translator = FakeTranslator("Hello")
+
+    chunks = await handle_translate_command(translator, CONFIG, 7, "ja", "こんにちは")
+
+    assert chunks == ["翻訳する権限がありません。"]
+    assert translator.calls == []
+
+
+async def test_translate_command_returns_only_translation():
+    translator = FakeTranslator("Hello")
+
+    chunks = await handle_translate_command(translator, CONFIG, 42, "ja", "こんにちは")
+
+    assert chunks == ["Hello"]
+
+
+async def test_translate_command_targets_the_other_language():
+    translator = FakeTranslator("x")
+
+    await handle_translate_command(translator, CONFIG, 42, "ja", "a")
+    await handle_translate_command(translator, CONFIG, 42, "en", "b")
+
+    assert translator.calls == [("a", "ja", "en"), ("b", "en", "ja")]
+
+
+async def test_translate_command_splits_long_translation():
+    translator = FakeTranslator("a" * 2001)
+
+    chunks = await handle_translate_command(translator, CONFIG, 42, "en", "x")
+
+    assert chunks == ["a" * 2000, "a"]
+
+
+async def test_translate_command_rate_limited_tells_when_to_retry():
+    translator = FakeTranslator(error=RateLimitExceeded("limited", retry_after=12))
+
+    chunks = await handle_translate_command(translator, CONFIG, 42, "ja", "x")
+
+    assert chunks == ["12秒後にもう一度送信してください。"]
+
+
+async def test_translate_command_failure_hides_details():
+    translator = FakeTranslator(error=SarashinaError("400: secret detail", 400))
+
+    chunks = await handle_translate_command(translator, CONFIG, 42, "ja", "x")
+
+    assert chunks == ["翻訳に失敗しました。"]
+
+
+async def test_translate_command_unexpected_error_is_a_failure():
+    translator = FakeTranslator(error=RuntimeError("boom"))
+
+    chunks = await handle_translate_command(translator, CONFIG, 42, "ja", "x")
+
+    assert chunks == ["翻訳に失敗しました。"]
+
+
+async def test_translate_command_empty_translation_is_a_failure():
+    translator = FakeTranslator("")
+
+    chunks = await handle_translate_command(translator, CONFIG, 42, "ja", "x")
+
+    assert chunks == ["翻訳に失敗しました。"]
+
+
+async def test_translate_command_logs_length_without_text(caplog):
+    translator = FakeTranslator("secret-out")
+
+    with caplog.at_level(logging.INFO, logger="sarashina_bot.bot"):
+        await handle_translate_command(translator, CONFIG, 42, "ja", "secret-in")
+
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "translate: source=ja chars=9" in logged
+    assert "secret-in" not in logged
+    assert "secret-out" not in logged

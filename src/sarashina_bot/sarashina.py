@@ -67,6 +67,8 @@ class SarashinaClient:
         # Set by /effort; kept across /model switches but sent only to REASONING_EFFORT_MODEL.
         self.reasoning_effort: str | None = None
         self._limiter = _RateLimiter(rpm, clock=clock)
+        # The API limit is per model, so translation must not use up the chat model's slots.
+        self._translate_limiter = _RateLimiter(rpm, clock=clock)
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {api_key}"},
@@ -95,14 +97,8 @@ class SarashinaClient:
             body["tools"] = tools
             body["tool_choice"] = "auto"
         log.debug("sarashina request: %s", json.dumps(body, ensure_ascii=False))
-        response = await self._post(body)
-        # The API limit is a fixed one-minute window, so retrying before Retry-After is pointless.
-        if response.status_code == 429:
-            raise RateLimitExceeded(
-                "rate limited", retry_after=_retry_after(response), status=429
-            )
-        if response.status_code >= 400:
-            raise SarashinaError(_error_message(response), response.status_code)
+        response = await self._post("/chat/completions", body)
+        _raise_for_status(response)
         data = response.json()
         choice = data["choices"][0]
         message = choice["message"]
@@ -121,11 +117,37 @@ class SarashinaClient:
         result["finish_reason"] = choice.get("finish_reason")
         return result
 
-    async def _post(self, body: dict) -> httpx.Response:
+    async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
+        await self._translate_limiter.acquire()
+        # No debug dump of the body here: the text is the user's and stays out of the logs.
+        response = await self._post(
+            "/translate",
+            {"text": text, "source_lang": source_lang, "target_lang": target_lang},
+        )
+        _raise_for_status(response)
         try:
-            return await self._client.post("/chat/completions", json=body)
+            translated = response.json()["translated_text"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise SarashinaError(f"unexpected translate response: {exc!r}") from exc
+        if not isinstance(translated, str):
+            raise SarashinaError("unexpected translate response: translated_text is not str")
+        return translated
+
+    async def _post(self, path: str, body: dict) -> httpx.Response:
+        try:
+            return await self._client.post(path, json=body)
         except httpx.HTTPError as exc:
             raise SarashinaError(str(exc)) from exc
+
+
+def _raise_for_status(response: httpx.Response) -> None:
+    # The API limit is a fixed one-minute window, so retrying before Retry-After is pointless.
+    if response.status_code == 429:
+        raise RateLimitExceeded(
+            "rate limited", retry_after=_retry_after(response), status=429
+        )
+    if response.status_code >= 400:
+        raise SarashinaError(_error_message(response), response.status_code)
 
 
 def _retry_after(response: httpx.Response) -> int:

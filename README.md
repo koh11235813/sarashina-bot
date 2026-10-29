@@ -8,6 +8,7 @@ A Discord bot that replies to mentions using the [Sarashina](https://api.sarashi
 - Users listed in `DISCORD_ALLOWED_USERS` also get a `run_command` tool, which runs bash in a separate sandbox pod over HTTP.
 - `/model [name]` lets allowed users switch between the models in `SARASHINA_MODELS` (reply is ephemeral; the switch lasts until the process restarts).
 - `/effort level` lets the same users set `reasoning_effort` (`low` / `medium` / `high`). Only `sarashina3.2-mini-thinking` accepts it, so the command refuses on other models and the bot sends it only while that model is selected; the setting survives `/model` switches. If thinking uses up the output limit and the answer comes back empty, the bot replies 「回答が出せませんでした。effort を下げてください。」.
+- `/translate source text` lets the same users translate between Japanese and English with Sarashina's Translate API. `source` is `ja` or `en` and the target is the other one; `text` is up to 5,000 characters. The reply is public and contains only the translation (split if over 2,000 characters). On failure the bot replies 「翻訳に失敗しました。」. Translations are not part of the conversation context.
 
 Design details and Sarashina API quirks are in [SPEC.md](SPEC.md) (Japanese).
 
@@ -43,12 +44,12 @@ All settings are environment variables (see `src/sarashina_bot/config.py`).
 | `DISCORD_TOKEN` | yes | | Discord bot token |
 | `SARASHINA_API_KEY` | yes | | Sarashina API key |
 | `EXA_API_KEY` | yes | | Exa API key for `web_search` |
-| `DISCORD_ALLOWED_USERS` | no | empty | Comma-separated Discord user IDs that get `run_command`, `/model` and `/effort` |
+| `DISCORD_ALLOWED_USERS` | no | empty | Comma-separated Discord user IDs that get `run_command`, `/model`, `/effort` and `/translate` |
 | `SARASHINA_MODEL` | no | `sarashina3-mini` | Model used at startup; must be in `SARASHINA_MODELS` |
 | `SARASHINA_MODELS` | no | value of `SARASHINA_MODEL` | Comma-separated choices for `/model` |
 | `SANDBOX_URL` | no | `http://sandbox:8080` | Base URL of the sandbox |
 | `MAX_TOOL_ROUNDS` | no | `2` | Tool rounds per mention; `MAX_TOOL_ROUNDS + 1` must not exceed `RATE_LIMIT_RPM` |
-| `RATE_LIMIT_RPM` | no | `30` | Client-side limit on Sarashina requests per minute. When it or Sarashina's own limit (429) is hit, the bot replies 「{x}秒後にもう一度送信してください。」 with the seconds to wait |
+| `RATE_LIMIT_RPM` | no | `30` | Client-side limit on Sarashina requests per minute. When it or Sarashina's own limit (429) is hit, the bot replies 「{x}秒後にもう一度送信してください。」 with the seconds to wait. `/translate` has its own limiter with the same value, since Sarashina counts translation separately from chat |
 | `CONTEXT_MESSAGE_COUNT` | no | `10` | How many recent channel messages to read before filtering |
 | `SYSTEM_PROMPT` | no | short built-in Japanese prompt | System prompt |
 | `LOG_LEVEL` | no | `INFO` | Python log level (also read by the sandbox) |
