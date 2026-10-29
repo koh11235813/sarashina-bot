@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from collections import deque
 from collections.abc import Callable
@@ -23,7 +24,9 @@ class SarashinaError(Exception):
 
 
 class RateLimitExceeded(SarashinaError):
-    pass
+    def __init__(self, message: str, retry_after: int, status: int | None = None) -> None:
+        super().__init__(message, status)
+        self.retry_after = retry_after
 
 
 class _RateLimiter:
@@ -39,7 +42,10 @@ class _RateLimiter:
             while self._times and now - self._times[0] >= 60:
                 self._times.popleft()
             if len(self._times) + require > self._rpm:
-                raise RateLimitExceeded("rate limit exceeded")
+                # The k-th oldest request has to leave the window before require slots are free.
+                k = len(self._times) + require - self._rpm
+                retry_after = max(1, math.ceil(self._times[k - 1] + 60 - now))
+                raise RateLimitExceeded("rate limit exceeded", retry_after=retry_after)
             self._times.append(now)
 
 
@@ -51,13 +57,11 @@ class SarashinaClient:
         *,
         base_url: str = DEFAULT_BASE_URL,
         rpm: int = 5,
-        backoff: float = 5.0,
         clock: Callable[[], float] = time.monotonic,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         # Public so /model can switch it at runtime; every later request uses the new value.
         self.model = model
-        self._backoff = backoff
         self._limiter = _RateLimiter(rpm, clock=clock)
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
@@ -76,7 +80,6 @@ class SarashinaClient:
         *,
         require_slots: int = 1,
     ) -> dict:
-        # The retry below must not consume a second limiter slot.
         await self._limiter.acquire(require_slots)
         return await self._request(messages, tools)
 
@@ -87,11 +90,11 @@ class SarashinaClient:
             body["tool_choice"] = "auto"
         log.debug("sarashina request: %s", json.dumps(body, ensure_ascii=False))
         response = await self._post(body)
+        # The API limit is a fixed one-minute window, so retrying before Retry-After is pointless.
         if response.status_code == 429:
-            await asyncio.sleep(self._backoff)
-            response = await self._post(body)
-            if response.status_code == 429:
-                raise SarashinaError("rate limited", 429)
+            raise RateLimitExceeded(
+                "rate limited", retry_after=_retry_after(response), status=429
+            )
         if response.status_code >= 400:
             raise SarashinaError(_error_message(response), response.status_code)
         data = response.json()
@@ -115,6 +118,14 @@ class SarashinaClient:
             return await self._client.post("/chat/completions", json=body)
         except httpx.HTTPError as exc:
             raise SarashinaError(str(exc)) from exc
+
+
+def _retry_after(response: httpx.Response) -> int:
+    try:
+        return int(response.headers["Retry-After"])
+    except (KeyError, ValueError):
+        # A fixed one-minute window always resets within 60 seconds.
+        return 60
 
 
 def _error_message(response: httpx.Response) -> str:

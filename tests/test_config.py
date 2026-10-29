@@ -22,6 +22,7 @@ def test_defaults_offer_only_the_default_model():
     assert config.model == "sarashina3-mini"
     assert config.models == ("sarashina3-mini",)
     assert config.allowed_user_ids == frozenset()
+    assert config.rate_limit_rpm == 30
 
 
 def test_models_and_allowed_users_are_comma_separated(monkeypatch):

@@ -47,7 +47,7 @@ All settings are environment variables (see `src/sarashina_bot/config.py`).
 | `SARASHINA_MODELS` | no | value of `SARASHINA_MODEL` | Comma-separated choices for `/model` |
 | `SANDBOX_URL` | no | `http://sandbox:8080` | Base URL of the sandbox |
 | `MAX_TOOL_ROUNDS` | no | `2` | Tool rounds per mention; `MAX_TOOL_ROUNDS + 1` must not exceed `RATE_LIMIT_RPM` |
-| `RATE_LIMIT_RPM` | no | `5` | Client-side limit on Sarashina requests per minute |
+| `RATE_LIMIT_RPM` | no | `30` | Client-side limit on Sarashina requests per minute. When it or Sarashina's own limit (429) is hit, the bot replies 「{x}秒後にもう一度送信してください。」 with the seconds to wait |
 | `CONTEXT_MESSAGE_COUNT` | no | `10` | How many recent channel messages to read before filtering |
 | `SYSTEM_PROMPT` | no | short built-in Japanese prompt | System prompt |
 | `LOG_LEVEL` | no | `INFO` | Python log level (also read by the sandbox) |

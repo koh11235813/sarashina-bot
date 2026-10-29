@@ -9,6 +9,7 @@ from sarashina_bot.bot import (
     build_messages,
     generate_reply,
     handle_model_command,
+    rate_limited_message,
     split_message,
 )
 from sarashina_bot.config import Config
@@ -535,3 +536,7 @@ def test_model_command_refuses_others():
     handle_model_command(sarashina, CONFIG, 7, "sarashina3.2-mini-thinking")
 
     assert sarashina.model == "sarashina3-mini"
+
+
+def test_rate_limited_message_tells_when_to_retry():
+    assert rate_limited_message(12) == "12秒後にもう一度送信してください。"

@@ -21,7 +21,7 @@ class Config:
     max_tool_rounds: int = 2
     context_message_count: int = 10
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
-    rate_limit_rpm: int = 5
+    rate_limit_rpm: int = 30
     log_level: str = "INFO"
 
     @classmethod
@@ -33,7 +33,7 @@ class Config:
         if model not in models:
             raise RuntimeError(f"SARASHINA_MODEL {model} is not in SARASHINA_MODELS")
         max_tool_rounds = int(os.getenv("MAX_TOOL_ROUNDS", "2"))
-        rate_limit_rpm = int(os.getenv("RATE_LIMIT_RPM", "5"))
+        rate_limit_rpm = int(os.getenv("RATE_LIMIT_RPM", "30"))
         # A mention reserves max_tool_rounds + 1 calls up front, so it could never pass the limiter.
         if max_tool_rounds + 1 > rate_limit_rpm:
             raise RuntimeError("MAX_TOOL_ROUNDS + 1 must not exceed RATE_LIMIT_RPM")
