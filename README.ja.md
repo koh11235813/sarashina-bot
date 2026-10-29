@@ -7,6 +7,7 @@
 - モデルは [Exa](https://exa.ai) で web を検索できます（`web_search` ツール。全員に見せる）。
 - `DISCORD_ALLOWED_USERS` に入っている人には `run_command` ツールも見せます。別の Pod のサンドボックスに HTTP でコマンドを送り、bash で実行します。
 - 同じく `DISCORD_ALLOWED_USERS` の人は `/model [name]` で `SARASHINA_MODELS` のモデルに切り替えられます（返事は本人にだけ見え、切り替えはプロセスが再起動するまで続きます）。
+- `/effort level` では `reasoning_effort`（`low` / `medium` / `high`）を指定できます。受け付けるのは `sarashina3.2-mini-thinking` だけなので、ほかのモデルのときは断り、送るのもこのモデルを選んでいるあいだだけです。指定は `/model` で切り替えても残ります。考えているうちに出力の上限を使い切って回答が空になったときは、「回答が出せませんでした。effort を下げてください。」と返します。
 
 設計の詳細や Sarashina API のクセは [SPEC.md](SPEC.md) にまとめてあります。
 
@@ -42,7 +43,7 @@
 | `DISCORD_TOKEN` | ○ | | Discord bot のトークン |
 | `SARASHINA_API_KEY` | ○ | | Sarashina の API キー |
 | `EXA_API_KEY` | ○ | | `web_search` に使う Exa の API キー |
-| `DISCORD_ALLOWED_USERS` | | 空 | `run_command` と `/model` を使える Discord ユーザー ID（カンマ区切り） |
+| `DISCORD_ALLOWED_USERS` | | 空 | `run_command`・`/model`・`/effort` を使える Discord ユーザー ID（カンマ区切り） |
 | `SARASHINA_MODEL` | | `sarashina3-mini` | 起動時のモデル。`SARASHINA_MODELS` に入っていないと起動しない |
 | `SARASHINA_MODELS` | | `SARASHINA_MODEL` の値 | `/model` の選択肢（カンマ区切り） |
 | `SANDBOX_URL` | | `http://sandbox:8080` | サンドボックスのベース URL |

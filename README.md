@@ -7,6 +7,7 @@ A Discord bot that replies to mentions using the [Sarashina](https://api.sarashi
 - The model can search the web through [Exa](https://exa.ai) (`web_search` tool, offered to everyone).
 - Users listed in `DISCORD_ALLOWED_USERS` also get a `run_command` tool, which runs bash in a separate sandbox pod over HTTP.
 - `/model [name]` lets allowed users switch between the models in `SARASHINA_MODELS` (reply is ephemeral; the switch lasts until the process restarts).
+- `/effort level` lets the same users set `reasoning_effort` (`low` / `medium` / `high`). Only `sarashina3.2-mini-thinking` accepts it, so the command refuses on other models and the bot sends it only while that model is selected; the setting survives `/model` switches. If thinking uses up the output limit and the answer comes back empty, the bot replies 「回答が出せませんでした。effort を下げてください。」.
 
 Design details and Sarashina API quirks are in [SPEC.md](SPEC.md) (Japanese).
 
@@ -42,7 +43,7 @@ All settings are environment variables (see `src/sarashina_bot/config.py`).
 | `DISCORD_TOKEN` | yes | | Discord bot token |
 | `SARASHINA_API_KEY` | yes | | Sarashina API key |
 | `EXA_API_KEY` | yes | | Exa API key for `web_search` |
-| `DISCORD_ALLOWED_USERS` | no | empty | Comma-separated Discord user IDs that get `run_command` and `/model` |
+| `DISCORD_ALLOWED_USERS` | no | empty | Comma-separated Discord user IDs that get `run_command`, `/model` and `/effort` |
 | `SARASHINA_MODEL` | no | `sarashina3-mini` | Model used at startup; must be in `SARASHINA_MODELS` |
 | `SARASHINA_MODELS` | no | value of `SARASHINA_MODEL` | Comma-separated choices for `/model` |
 | `SANDBOX_URL` | no | `http://sandbox:8080` | Base URL of the sandbox |

@@ -29,6 +29,10 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
 - `tool_choice` を `tools` と併用する場合、自律判断させたいなら `"auto"` を明示指定
   （省略時は `required` 扱い）
 - ストリーミング不使用のため `stream` は常に送らない
+- `reasoning_effort`（`low` / `medium` / `high`）を受け付けるのは sarashina3.2-mini-thinking だけで、
+  ほかのモデルに送ると 400（`reasoning_effort is not supported for model ...`）。
+  そのため送るのはリクエスト時のモデル名がちょうど `sarashina3.2-mini-thinking` のときだけにする
+  （`-thinking` で終わるかでは判定しない。対応が分からないモデルで 400 を招くため）
 - エラー本文は `{"message": "..."}` のみ。400 の原因は body から分からないので、
   クライアントは送出リクエスト JSON 全体を debug ログに出す
 
@@ -74,6 +78,8 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
   6. システムプロンプトを先頭に付与し、末尾に「話しかけているのは〇〇さんです。」を足す
      （システムプロンプトの内容は ConfigMap で差し替え可能）
 - 応答: 生成完了後に単発で返信。長文は Discord 上限 2,000 文字で分割送信
+- 最終回答の本文が空で `finish_reason` が `length` のとき（推論の途中で `max_completion_tokens` に達した）は
+  「回答が出せませんでした。effort を下げてください。」と返す。ほかの理由で空のときは何も返さない
 - エラー時: レート制限超過は「{x}秒後にもう一度送信してください。」、
   それ以外の API 失敗などは「返信に失敗した」旨の短文を返す
   （スタックトレース等を Discord に出さない）
@@ -100,7 +106,11 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
 
 - `/model [name]`: `SARASHINA_MODELS` から選んで切り替える。省略すると今のモデルを表示する。
   `DISCORD_ALLOWED_USERS` の人だけ使え、応答は本人にだけ見える（ephemeral）
-- 切り替えはプロセス内だけで、Pod が作り直されると `SARASHINA_MODEL` に戻る
+- `/effort level`: `low` / `medium` / `high` から選んで `reasoning_effort` を指定する。
+  今のモデルが sarashina3.2-mini-thinking でなければ「{model} では effort を指定できません。」と返して何も変えない。
+  使える人と ephemeral は `/model` と同じ。起動直後は未指定で、そのあいだは `reasoning_effort` を送らない
+- 指定した effort は `/model` で切り替えても残り、sarashina3.2-mini-thinking に戻すとまた効く
+- 切り替えはプロセス内だけで、Pod が作り直されると `SARASHINA_MODEL` と effort 未指定に戻る
 - コマンドは起動のたびに `tree.sync()` でグローバルに登録する
 
 ## 設定・シークレット
@@ -111,7 +121,7 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
 | `SARASHINA_API_KEY` | k3s Secret |
 | `SARASHINA_MODEL`（既定 sarashina3-mini） | ConfigMap |
 | `SARASHINA_MODELS`（`/model` の選択肢、カンマ区切り。`SARASHINA_MODEL` を含める） | ConfigMap |
-| `DISCORD_ALLOWED_USERS`（ターミナルと `/model` を使える Discord ユーザー ID、カンマ区切り） | k3s Secret |
+| `DISCORD_ALLOWED_USERS`（ターミナルと `/model`・`/effort` を使える Discord ユーザー ID、カンマ区切り） | k3s Secret |
 | `SANDBOX_URL`（既定 `http://sandbox:8080`） | ConfigMap |
 | `MAX_TOOL_ROUNDS`（既定 2。`+ 1` が `RATE_LIMIT_RPM` 以下） | ConfigMap |
 | `CONTEXT_MESSAGE_COUNT`（既定 10） | ConfigMap |
@@ -130,7 +140,7 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
 
 ## 非目標（スコープ外）
 
-- `/model` 以外のスラッシュコマンド、ボタン/選択 UI
+- `/model`・`/effort` 以外のスラッシュコマンド、ボタン/選択 UI
 - Embeddings / Rerank / Translate エンドポイントの利用
 - 会話履歴のデータベース保存
 - モデレーション（sarashina3-guard）

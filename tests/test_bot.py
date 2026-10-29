@@ -8,12 +8,14 @@ from sarashina_bot.bot import (
     _reply_to_author_id,
     build_messages,
     generate_reply,
+    handle_effort_command,
     handle_model_command,
     rate_limited_message,
     split_message,
 )
 from sarashina_bot.config import Config
 from sarashina_bot.exa import ExaError
+from sarashina_bot.sarashina import REASONING_EFFORT_MODEL
 from sarashina_bot.terminal import TerminalError
 
 
@@ -281,8 +283,8 @@ async def reply(sarashina, exa=None, terminal=None, *, allow_terminal=False, max
     )
 
 
-def text(content):
-    return {"role": "assistant", "content": content}
+def text(content, finish_reason="stop"):
+    return {"role": "assistant", "content": content, "finish_reason": finish_reason}
 
 
 def tool_call(id, arguments, name="web_search"):
@@ -498,9 +500,51 @@ async def test_loop_ends_when_model_stops_calling_tools():
     assert sarashina.calls[1]["tools"] == [WEB_SEARCH_TOOL, RUN_COMMAND_TOOL]
 
 
+LENGTH_MESSAGE = "回答が出せませんでした。effort を下げてください。"
+
+
+async def test_empty_answer_cut_by_length_asks_to_lower_effort():
+    sarashina = FakeSarashina(text("", finish_reason="length"))
+
+    assert await reply(sarashina) == LENGTH_MESSAGE
+
+
+async def test_empty_forced_answer_cut_by_length_asks_to_lower_effort():
+    sarashina = FakeSarashina(
+        wants_tools(tool_call("call-1", search_args("q"))),
+        text("", finish_reason="length"),
+    )
+
+    assert await reply(sarashina) == LENGTH_MESSAGE
+
+
+async def test_answer_cut_by_length_is_kept_when_not_empty():
+    sarashina = FakeSarashina(text("partial", finish_reason="length"))
+
+    assert await reply(sarashina) == "partial"
+
+
+async def test_empty_answer_for_other_reasons_stays_empty():
+    sarashina = FakeSarashina(text(""))
+
+    assert await reply(sarashina) == ""
+
+
+async def test_finish_reason_is_not_sent_back_to_the_api():
+    call = tool_call("call-1", search_args("q"))
+    sarashina = FakeSarashina(
+        {**wants_tools(call), "finish_reason": "tool_calls"}, text("ok")
+    )
+
+    await reply(sarashina)
+
+    assert all("finish_reason" not in m for m in sarashina.calls[1]["messages"])
+
+
 class FakeModelHolder:
     def __init__(self, model):
         self.model = model
+        self.reasoning_effort = None
 
 
 CONFIG = Config(
@@ -536,6 +580,33 @@ def test_model_command_refuses_others():
     handle_model_command(sarashina, CONFIG, 7, "sarashina3.2-mini-thinking")
 
     assert sarashina.model == "sarashina3-mini"
+
+
+def test_effort_command_sets_effort_on_thinking_model():
+    sarashina = FakeModelHolder(REASONING_EFFORT_MODEL)
+
+    text = handle_effort_command(sarashina, CONFIG, 42, "high")
+
+    assert sarashina.reasoning_effort == "high"
+    assert text == "effort を high にしました。"
+
+
+def test_effort_command_refuses_other_models():
+    sarashina = FakeModelHolder("sarashina3-mini")
+    sarashina.reasoning_effort = "low"
+
+    text = handle_effort_command(sarashina, CONFIG, 42, "high")
+
+    assert sarashina.reasoning_effort == "low"
+    assert text == "sarashina3-mini では effort を指定できません。"
+
+
+def test_effort_command_refuses_others():
+    sarashina = FakeModelHolder(REASONING_EFFORT_MODEL)
+
+    handle_effort_command(sarashina, CONFIG, 7, "high")
+
+    assert sarashina.reasoning_effort is None
 
 
 def test_rate_limited_message_tells_when_to_retry():
