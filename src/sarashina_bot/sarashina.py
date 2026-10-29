@@ -15,6 +15,8 @@ log = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://api.sarashina.ai/v1"
 # httpx's default 5s timeout is shorter than a typical non-streaming generation.
 DEFAULT_TIMEOUT = 120.0
+# The only model that accepts reasoning_effort; any other model answers it with 400.
+REASONING_EFFORT_MODEL = "sarashina3.2-mini-thinking"
 
 
 class SarashinaError(Exception):
@@ -62,6 +64,8 @@ class SarashinaClient:
     ) -> None:
         # Public so /model can switch it at runtime; every later request uses the new value.
         self.model = model
+        # Set by /effort; kept across /model switches but sent only to REASONING_EFFORT_MODEL.
+        self.reasoning_effort: str | None = None
         self._limiter = _RateLimiter(rpm, clock=clock)
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
@@ -85,6 +89,8 @@ class SarashinaClient:
 
     async def _request(self, messages: list[dict], tools: list[dict] | None) -> dict:
         body = {"model": self.model, "messages": messages}
+        if self.reasoning_effort is not None and self.model == REASONING_EFFORT_MODEL:
+            body["reasoning_effort"] = self.reasoning_effort
         if tools is not None:
             body["tools"] = tools
             body["tool_choice"] = "auto"

@@ -8,12 +8,14 @@ from sarashina_bot.bot import (
     _reply_to_author_id,
     build_messages,
     generate_reply,
+    handle_effort_command,
     handle_model_command,
     rate_limited_message,
     split_message,
 )
 from sarashina_bot.config import Config
 from sarashina_bot.exa import ExaError
+from sarashina_bot.sarashina import REASONING_EFFORT_MODEL
 from sarashina_bot.terminal import TerminalError
 
 
@@ -501,6 +503,7 @@ async def test_loop_ends_when_model_stops_calling_tools():
 class FakeModelHolder:
     def __init__(self, model):
         self.model = model
+        self.reasoning_effort = None
 
 
 CONFIG = Config(
@@ -536,6 +539,33 @@ def test_model_command_refuses_others():
     handle_model_command(sarashina, CONFIG, 7, "sarashina3.2-mini-thinking")
 
     assert sarashina.model == "sarashina3-mini"
+
+
+def test_effort_command_sets_effort_on_thinking_model():
+    sarashina = FakeModelHolder(REASONING_EFFORT_MODEL)
+
+    text = handle_effort_command(sarashina, CONFIG, 42, "high")
+
+    assert sarashina.reasoning_effort == "high"
+    assert text == "effort を high にしました。"
+
+
+def test_effort_command_refuses_other_models():
+    sarashina = FakeModelHolder("sarashina3-mini")
+    sarashina.reasoning_effort = "low"
+
+    text = handle_effort_command(sarashina, CONFIG, 42, "high")
+
+    assert sarashina.reasoning_effort == "low"
+    assert text == "sarashina3-mini では effort を指定できません。"
+
+
+def test_effort_command_refuses_others():
+    sarashina = FakeModelHolder(REASONING_EFFORT_MODEL)
+
+    handle_effort_command(sarashina, CONFIG, 7, "high")
+
+    assert sarashina.reasoning_effort is None
 
 
 def test_rate_limited_message_tells_when_to_retry():

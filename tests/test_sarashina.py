@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from sarashina_bot.sarashina import (
+    REASONING_EFFORT_MODEL,
     RateLimitExceeded,
     SarashinaClient,
     SarashinaError,
@@ -272,3 +273,42 @@ async def test_response_without_tool_calls_is_logged(caplog):
     logged = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.INFO)
     assert "finish_reason=stop" in logged
     assert "secret-content" not in logged
+
+
+async def sent_body(model, reasoning_effort):
+    captured = {}
+
+    async def handler(request):
+        captured["body"] = json.loads(request.content)
+        return ok("hi")
+
+    client = make_client(handler)
+    client.model = model
+    client.reasoning_effort = reasoning_effort
+    await client.chat([{"role": "user", "content": "yo"}])
+    return captured["body"]
+
+
+async def test_reasoning_effort_is_sent_to_thinking_model():
+    body = await sent_body(REASONING_EFFORT_MODEL, "high")
+    assert body["reasoning_effort"] == "high"
+
+
+async def test_reasoning_effort_is_not_sent_to_other_models():
+    body = await sent_body("sarashina3-mini", "high")
+    assert "reasoning_effort" not in body
+
+
+async def test_reasoning_effort_is_not_sent_when_unset():
+    body = await sent_body(REASONING_EFFORT_MODEL, None)
+    assert "reasoning_effort" not in body
+
+
+async def test_reasoning_effort_needs_exact_model_name():
+    body = await sent_body("foo-thinking", "high")
+    assert "reasoning_effort" not in body
+
+
+async def test_reasoning_effort_is_unset_at_start():
+    client = make_client(lambda request: ok("hi"))
+    assert client.reasoning_effort is None
