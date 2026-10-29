@@ -55,7 +55,8 @@ class SarashinaClient:
         clock: Callable[[], float] = time.monotonic,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self._model = model
+        # Public so /model can switch it at runtime; every later request uses the new value.
+        self.model = model
         self._backoff = backoff
         self._limiter = _RateLimiter(rpm, clock=clock)
         self._client = httpx.AsyncClient(
@@ -80,7 +81,7 @@ class SarashinaClient:
         return await self._request(messages, tools)
 
     async def _request(self, messages: list[dict], tools: list[dict] | None) -> dict:
-        body = {"model": self._model, "messages": messages}
+        body = {"model": self.model, "messages": messages}
         if tools is not None:
             body["tools"] = tools
             body["tool_choice"] = "auto"

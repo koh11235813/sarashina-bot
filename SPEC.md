@@ -11,7 +11,7 @@
 
 | 項目 | 決定 |
 | --- | --- |
-| LLM モデル | sarashina3-mini のみ（guard は不使用） |
+| LLM モデル | sarashina3-mini（既定）と sarashina3.2-mini-thinking を `/model` で切り替え（guard は不使用） |
 | 会話履歴 | メンション時、直近 N 件のチャンネル履歴をコンテキストに含める |
 | 応答方式 | 単発送信（生成完了後に 1 メッセージ送信。ストリーミング・編集なし） |
 | LLM クライアント | 自前の薄いラッパー（httpx。OpenAI SDK は使わない） |
@@ -27,7 +27,7 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
 - `logprobs` / `stream_options` 等は送らない
 - `GET /v1/models` は存在しない（404）→ モデル ID は設定値（ConfigMap）
 - `tool_choice` を `tools` と併用する場合、自律判断させたいなら `"auto"` を明示指定
-  （省略時は `required` 扱い）。本仕様ではツール呼び出しは使用しない
+  （省略時は `required` 扱い）
 - ストリーミング不使用のため `stream` は常に送らない
 - エラー本文は `{"message": "..."}` のみ。400 の原因は body から分からないので、
   クライアントは送出リクエスト JSON 全体を debug ログに出す
@@ -52,6 +52,31 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
 - エラー時: API 失敗・レート制限超過は「返信に失敗した」旨の短文を返す
   （スタックトレース等を Discord に出さない）
 
+## ツール
+
+- `web_search`（Exa）: 全員に見せる
+- `run_command`（サンドボックスで bash を実行）: `DISCORD_ALLOWED_USERS` の人がメンションしたときだけ見せる。
+  見せていないのにモデルが呼んだら実行せずにエラー文を返す
+- 1 メンションで最大 `MAX_TOOL_ROUNDS` 回ツールを回し、最後は `tools` を外してテキスト回答を強制する。
+  LLM 呼び出しは最大 `MAX_TOOL_ROUNDS + 1` 回で、最初の呼び出しでその分の空きをレートリミッタに確認する
+
+## サンドボックス
+
+- bot と同じイメージを `python -m sarashina_bot.sandbox` で別 Pod として動かす。Secret は渡さない
+- `POST /run` に `{"command": str}` を受け、`bash -c` で実行して `{"exit_code", "timed_out", "output"}` を返す
+- 実行ユーザーは non-root（UID 10001）、作業ディレクトリは `/work`（emptyDir。Pod が作り直されると消える）
+- 30 秒で打ち切り、プロセスグループごと SIGKILL する（バックグラウンドのプロセスも残らない）
+- 出力は stdout と stderr をまとめ、先頭 4,000 バイトまで返す
+- 環境変数は PATH・HOME・LANG・TMPDIR だけ。ServiceAccount トークンはマウントしない
+- NetworkPolicy: ingress は bot の Pod からだけ。egress は DNS とインターネットだけ（LAN・ホスト・cluster 内へは出さない）
+
+## スラッシュコマンド
+
+- `/model [name]`: `SARASHINA_MODELS` から選んで切り替える。省略すると今のモデルを表示する。
+  `DISCORD_ALLOWED_USERS` の人だけ使え、応答は本人にだけ見える（ephemeral）
+- 切り替えはプロセス内だけで、Pod が作り直されると `SARASHINA_MODEL` に戻る
+- コマンドは起動のたびに `tree.sync()` でグローバルに登録する
+
 ## 設定・シークレット
 
 | 項目 | 提供方法 |
@@ -59,6 +84,10 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
 | `DISCORD_TOKEN` | k3s Secret |
 | `SARASHINA_API_KEY` | k3s Secret |
 | `SARASHINA_MODEL`（既定 sarashina3-mini） | ConfigMap |
+| `SARASHINA_MODELS`（`/model` の選択肢、カンマ区切り。`SARASHINA_MODEL` を含める） | ConfigMap |
+| `DISCORD_ALLOWED_USERS`（ターミナルと `/model` を使える Discord ユーザー ID、カンマ区切り） | k3s Secret |
+| `SANDBOX_URL`（既定 `http://sandbox:8080`） | ConfigMap |
+| `MAX_TOOL_ROUNDS`（既定 2。`+ 1` が `RATE_LIMIT_RPM` 以下） | ConfigMap |
 | `CONTEXT_MESSAGE_COUNT`（既定 10） | ConfigMap |
 | `SYSTEM_PROMPT` | ConfigMap |
 | `RATE_LIMIT_RPM`（既定 5） | ConfigMap |
@@ -75,7 +104,7 @@ Chat Completions は OpenAI 互換に見えるが、**ドキュメント未記�
 
 ## 非目標（スコープ外）
 
-- スラッシュコマンド、ボタン/選択 UI
+- `/model` 以外のスラッシュコマンド、ボタン/選択 UI
 - Embeddings / Rerank / Translate エンドポイントの利用
 - 会話履歴のデータベース保存
 - モデレーション（sarashina3-guard）
