@@ -9,7 +9,7 @@ from discord import app_commands
 
 from .config import Config
 from .exa import ExaClient, ExaError
-from .sarashina import SarashinaClient
+from .sarashina import RateLimitExceeded, SarashinaClient
 from .terminal import TerminalClient, TerminalError
 
 log = logging.getLogger(__name__)
@@ -223,6 +223,10 @@ def handle_model_command(
     return f"モデルを {name} に切り替えました。"
 
 
+def rate_limited_message(retry_after: int) -> str:
+    return f"{retry_after}秒後にもう一度送信してください。"
+
+
 class SarashinaBot(discord.Client):
     def __init__(
         self,
@@ -313,6 +317,13 @@ class SarashinaBot(discord.Client):
                 await message.channel.send(
                     chunk, allowed_mentions=allowed, suppress_embeds=True
                 )
+        except RateLimitExceeded as exc:
+            log.warning("rate limited: %s (retry_after=%s)", exc, exc.retry_after)
+            await message.reply(
+                rate_limited_message(exc.retry_after),
+                allowed_mentions=discord.AllowedMentions.none(),
+                suppress_embeds=True,
+            )
         except Exception:
             log.exception("failed to generate reply")
             await message.reply(
