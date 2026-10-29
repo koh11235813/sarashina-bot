@@ -1,9 +1,11 @@
 import json
+from types import SimpleNamespace
 
 from sarashina_bot.bot import (
     RUN_COMMAND_TOOL,
     WEB_SEARCH_TOOL,
     HistoryMessage,
+    _reply_to_author_id,
     build_messages,
     generate_reply,
     handle_model_command,
@@ -39,6 +41,11 @@ def bot(id, content, reply_to):
         is_bot=True,
         reply_to_author_id=reply_to,
     )
+
+
+def reply_to_missing():
+    # A reply whose target was deleted or is outside the fetched window.
+    return SimpleNamespace(reference=SimpleNamespace(resolved=None, message_id=999))
 
 
 def contents(out):
@@ -137,6 +144,28 @@ def test_continuation_chain_is_broken_by_a_human_message():
     ]
     out = build_messages(history, user(5, "now"), "sys")
     assert contents(out) == ["q", "part1", "now"]
+
+
+def test_reply_to_unknown_author_is_not_a_continuation():
+    history = [
+        user(1, "q"),
+        bot(2, "part1", reply_to=USER_ID),
+        bot(3, "to someone", reply_to=_reply_to_author_id(reply_to_missing(), {})),
+    ]
+    out = build_messages(history, user(4, "now"), "sys")
+    assert contents(out) == ["q", "part1", "now"]
+
+
+def test_reply_to_author_id():
+    authors = {10: OTHER_ID}
+    assert _reply_to_author_id(SimpleNamespace(reference=None), authors) is None
+    in_window = SimpleNamespace(
+        reference=SimpleNamespace(resolved=None, message_id=10)
+    )
+    assert _reply_to_author_id(in_window, authors) == OTHER_ID
+    unknown = _reply_to_author_id(reply_to_missing(), authors)
+    assert unknown is not None
+    assert unknown not in (USER_ID, OTHER_ID, BOT_ID)
 
 
 def test_continuation_at_window_start_is_dropped():

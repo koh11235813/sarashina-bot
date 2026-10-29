@@ -113,13 +113,18 @@ def build_messages(
     return messages
 
 
+# Snowflakes are never 0, so this matches no one. None would mean "not a reply",
+# and build_messages would then take the message as a split reply's continuation.
+_UNKNOWN_AUTHOR_ID = 0
+
+
 def _reply_to_author_id(message: discord.Message, authors: dict[int, int]) -> int | None:
     reference = message.reference
     if reference is None:
         return None
     if isinstance(reference.resolved, discord.Message):
         return reference.resolved.author.id
-    return authors.get(reference.message_id)
+    return authors.get(reference.message_id, _UNKNOWN_AUTHOR_ID)
 
 
 def split_message(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
