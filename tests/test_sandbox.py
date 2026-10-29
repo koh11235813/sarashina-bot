@@ -88,3 +88,16 @@ def test_http_unknown_path(server_url):
     with pytest.raises(urllib.error.HTTPError) as excinfo:
         post(f"{server_url}/other", {"command": "echo hi"})
     assert excinfo.value.code == 404
+
+
+def test_http_returns_500_when_command_cannot_start(server_url, tmp_path, monkeypatch):
+    missing = str(tmp_path / "missing")
+    monkeypatch.setattr(
+        sandbox, "run_command", lambda command: run_command(command, cwd=missing)
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        post(f"{server_url}/run", {"command": "echo hi"})
+
+    assert excinfo.value.code == 500
+    assert missing in json.loads(excinfo.value.read())["error"]
