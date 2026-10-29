@@ -11,7 +11,7 @@
 
 | 項目 | 決定 |
 | --- | --- |
-| LLM モデル | sarashina3-mini（既定）と sarashina3.2-mini-thinking を `/model` で切り替え（guard は不使用） |
+| LLM モデル | sarashina3-mini（既定）・sarashina3-nano・sarashina3.2-mini-thinking を `/model` で切り替え（guard は不使用） |
 | 会話履歴 | メンション時、直近 N 件のチャンネル履歴をコンテキストに含める |
 | 応答方式 | 単発送信（生成完了後に 1 メッセージ送信。ストリーミング・編集なし） |
 | LLM クライアント | 自前の薄いラッパー（httpx。OpenAI SDK は使わない） |
