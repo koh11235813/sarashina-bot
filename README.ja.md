@@ -47,7 +47,7 @@
 | `SARASHINA_MODELS` | | `SARASHINA_MODEL` の値 | `/model` の選択肢（カンマ区切り） |
 | `SANDBOX_URL` | | `http://sandbox:8080` | サンドボックスのベース URL |
 | `MAX_TOOL_ROUNDS` | | `2` | 1 回のメンションでツールを回す上限。`MAX_TOOL_ROUNDS + 1` は `RATE_LIMIT_RPM` 以下 |
-| `RATE_LIMIT_RPM` | | `5` | Sarashina へのリクエストを 1 分あたり何回までにするか（クライアント側の制限） |
+| `RATE_LIMIT_RPM` | | `30` | Sarashina へのリクエストを 1 分あたり何回までにするか（クライアント側の制限）。超えたときや Sarashina から 429 が返ったときは、「{x}秒後にもう一度送信してください。」と返信する |
 | `CONTEXT_MESSAGE_COUNT` | | `10` | 絞り込む前に読むチャンネルの直近メッセージ数 |
 | `SYSTEM_PROMPT` | | 組み込みの短い日本語のプロンプト | システムプロンプト |
 | `LOG_LEVEL` | | `INFO` | Python のログレベル（サンドボックスもこれを読む） |
