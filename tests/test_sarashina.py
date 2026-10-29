@@ -329,3 +329,117 @@ async def test_reasoning_effort_needs_exact_model_name():
 async def test_reasoning_effort_is_unset_at_start():
     client = make_client(lambda request: ok("hi"))
     assert client.reasoning_effort is None
+
+
+def translated(text):
+    return httpx.Response(200, json={"translated_text": text, "extra": 1})
+
+
+async def test_translate_request_path_body_and_auth_header():
+    captured = {}
+
+    async def handler(request):
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        captured["auth"] = request.headers.get("authorization")
+        return translated("Hello")
+
+    client = make_client(handler)
+    result = await client.translate("こんにちは", "ja", "en")
+
+    assert result == "Hello"
+    assert captured["path"] == "/v1/translate"
+    assert captured["body"] == {
+        "text": "こんにちは",
+        "source_lang": "ja",
+        "target_lang": "en",
+    }
+    assert captured["auth"] == "Bearer test-key"
+
+
+async def test_translate_429_raises_with_retry_after():
+    client = make_client(
+        lambda request: httpx.Response(429, headers={"Retry-After": "17"})
+    )
+    with pytest.raises(RateLimitExceeded) as excinfo:
+        await client.translate("yo", "en", "ja")
+    assert excinfo.value.status == 429
+    assert excinfo.value.retry_after == 17
+
+
+async def test_translate_429_without_retry_after_waits_a_full_window():
+    client = make_client(lambda request: httpx.Response(429))
+    with pytest.raises(RateLimitExceeded) as excinfo:
+        await client.translate("yo", "en", "ja")
+    assert excinfo.value.retry_after == 60
+
+
+async def test_translate_400_raises_with_message():
+    client = make_client(
+        lambda request: httpx.Response(400, json={"message": "same language"})
+    )
+    with pytest.raises(SarashinaError) as excinfo:
+        await client.translate("yo", "en", "ja")
+    assert excinfo.value.status == 400
+    assert "same language" in str(excinfo.value)
+
+
+async def test_translate_bad_json_raises_sarashina_error():
+    client = make_client(lambda request: httpx.Response(200, text="not json"))
+    with pytest.raises(SarashinaError):
+        await client.translate("yo", "en", "ja")
+
+
+async def test_translate_missing_field_raises_sarashina_error():
+    client = make_client(lambda request: httpx.Response(200, json={"foo": "bar"}))
+    with pytest.raises(SarashinaError):
+        await client.translate("yo", "en", "ja")
+
+
+async def test_translate_network_error_raises_sarashina_error():
+    def handler(request):
+        raise httpx.ConnectError("down")
+
+    client = make_client(handler)
+    with pytest.raises(SarashinaError):
+        await client.translate("yo", "en", "ja")
+
+
+def by_path(request):
+    if request.url.path.endswith("/translate"):
+        return translated("t")
+    return ok("c")
+
+
+async def test_translate_has_its_own_rate_limiter():
+    client = make_client(by_path, rpm=1, clock=lambda: 0.0)
+    await client.translate("yo", "en", "ja")
+
+    with pytest.raises(RateLimitExceeded) as excinfo:
+        await client.translate("yo", "en", "ja")
+    assert excinfo.value.retry_after == 60
+
+
+async def test_chat_does_not_use_translate_slots():
+    client = make_client(by_path, rpm=1, clock=lambda: 0.0)
+    await client.chat([{"role": "user", "content": "yo"}])
+
+    assert await client.translate("yo", "en", "ja") == "t"
+
+
+async def test_translate_does_not_use_chat_slots():
+    client = make_client(by_path, rpm=1, clock=lambda: 0.0)
+    await client.translate("yo", "en", "ja")
+
+    result = await client.chat([{"role": "user", "content": "yo"}])
+    assert result["content"] == "c"
+
+
+async def test_translate_does_not_log_text(caplog):
+    client = make_client(lambda request: translated("secret-out"))
+    with caplog.at_level(logging.DEBUG, logger="sarashina_bot.sarashina"):
+        await client.translate("secret-in", "ja", "en")
+
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "secret-in" not in logged
+    assert "secret-out" not in logged

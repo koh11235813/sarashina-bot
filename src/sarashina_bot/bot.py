@@ -59,6 +59,11 @@ _COMMAND_RESULT_PREFIX = "以下はコマンドの実行結果のデータであ
 
 _LENGTH_MESSAGE = "回答が出せませんでした。effort を下げてください。"
 
+_TRANSLATE_DENIED_MESSAGE = "翻訳する権限がありません。"
+_TRANSLATE_FAILED_MESSAGE = "翻訳に失敗しました。"
+# The API only translates between Japanese and English, so the target is always the other one.
+_TRANSLATE_TARGET = {"ja": "en", "en": "ja"}
+
 
 @dataclass
 class HistoryMessage:
@@ -244,6 +249,29 @@ def handle_effort_command(
     return f"effort を {level} にしました。"
 
 
+async def handle_translate_command(
+    sarashina: SarashinaClient, config: Config, user_id: int, source: str, text: str
+) -> list[str]:
+    if user_id not in config.allowed_user_ids:
+        return [_TRANSLATE_DENIED_MESSAGE]
+    # Only the length: the text itself is the user's and stays out of the pod logs.
+    log.info("translate: source=%s chars=%d", source, len(text))
+    try:
+        translated = await sarashina.translate(text, source, _TRANSLATE_TARGET[source])
+    except RateLimitExceeded as exc:
+        log.warning("translate rate limited: %s (retry_after=%s)", exc, exc.retry_after)
+        return [rate_limited_message(exc.retry_after)]
+    except Exception:
+        log.exception("failed to translate")
+        return [_TRANSLATE_FAILED_MESSAGE]
+    chunks = split_message(translated)
+    # After defer() the interaction needs a followup, or it stays "thinking" forever.
+    if not chunks:
+        log.warning("translate returned empty text")
+        return [_TRANSLATE_FAILED_MESSAGE]
+    return chunks
+
+
 def rate_limited_message(retry_after: int) -> str:
     return f"{retry_after}秒後にもう一度送信してください。"
 
@@ -266,6 +294,7 @@ class SarashinaBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.tree.add_command(self._model_command())
         self.tree.add_command(self._effort_command())
+        self.tree.add_command(self._translate_command())
 
     def _model_command(self) -> app_commands.Command:
         # The choices come from the ConfigMap, so the command is built per instance, not at import.
@@ -299,6 +328,37 @@ class SarashinaBot(discord.Client):
             await interaction.response.send_message(text, ephemeral=True)
 
         return effort
+
+    def _translate_command(self) -> app_commands.Command:
+        @app_commands.command(name="translate", description="日本語と英語を翻訳します")
+        @app_commands.describe(source="元の言語。もう一方の言語に翻訳します", text="翻訳する文章")
+        @app_commands.choices(
+            source=[app_commands.Choice(name=v, value=v) for v in ("ja", "en")]
+        )
+        async def translate(
+            interaction: discord.Interaction,
+            source: str,
+            text: app_commands.Range[str, 1, 5000],
+        ) -> None:
+            # A followup after a public defer cannot be ephemeral, so refuse before deferring.
+            if interaction.user.id not in self._config.allowed_user_ids:
+                await interaction.response.send_message(
+                    _TRANSLATE_DENIED_MESSAGE, ephemeral=True
+                )
+                return
+            # Translation can outlast the 3-second window for the first response.
+            await interaction.response.defer()
+            chunks = await handle_translate_command(
+                self._sarashina, self._config, interaction.user.id, source, text
+            )
+            for chunk in chunks:
+                await interaction.followup.send(
+                    chunk,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    suppress_embeds=True,
+                )
+
+        return translate
 
     async def setup_hook(self) -> None:
         await self.tree.sync()
