@@ -50,6 +50,15 @@ class _RateLimiter:
                 raise RateLimitExceeded("rate limit exceeded", retry_after=retry_after)
             self._times.append(now)
 
+    async def wait(self) -> None:
+        while True:
+            try:
+                await self.acquire()
+                return
+            except RateLimitExceeded as exc:
+                # acquire() releases the lock before sleeping, so other callers stay fail-fast.
+                await asyncio.sleep(exc.retry_after)
+
 
 class SarashinaClient:
     def __init__(
@@ -59,6 +68,7 @@ class SarashinaClient:
         *,
         base_url: str = DEFAULT_BASE_URL,
         rpm: int = 5,
+        embed_rpm: int = 55,
         clock: Callable[[], float] = time.monotonic,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -69,6 +79,7 @@ class SarashinaClient:
         self._limiter = _RateLimiter(rpm, clock=clock)
         # The API limit is per model, so translation must not use up the chat model's slots.
         self._translate_limiter = _RateLimiter(rpm, clock=clock)
+        self._embed_limiter = _RateLimiter(embed_rpm, clock=clock)
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {api_key}"},
@@ -132,6 +143,47 @@ class SarashinaClient:
         if not isinstance(translated, str):
             raise SarashinaError("unexpected translate response: translated_text is not str")
         return translated
+
+    async def embed(self, text: str, task_type: str) -> list[float]:
+        await self._embed_limiter.wait()
+        response = await self._post(
+            "/embeddings",
+            {"input": text, "task_type": task_type, "model": "sarashina3-embedding"},
+        )
+        _raise_for_status(response)
+        try:
+            vector = response.json()["data"][0]["embedding"]
+        except (ValueError, KeyError, TypeError, IndexError) as exc:
+            raise SarashinaError("unexpected embeddings response") from exc
+        if not isinstance(vector, list) or not vector or any(
+            type(value) not in (int, float) for value in vector
+        ):
+            raise SarashinaError(
+                "unexpected embeddings response: embedding is not a numeric list"
+            )
+        return [float(value) for value in vector]
+
+    async def rerank(self, query: str, documents: list[str]) -> list[int]:
+        response = await self._post(
+            "/rerank",
+            {
+                "query": query,
+                "documents": documents,
+                "task_type": "GENERAL_QA",
+                "model": "sarashina3-rerank",
+            },
+        )
+        _raise_for_status(response)
+        try:
+            results = response.json()["data"][0]["result"]
+            if not isinstance(results, list):
+                raise TypeError
+            ids = [item["document_id"] for item in results]
+        except (ValueError, KeyError, TypeError, IndexError) as exc:
+            raise SarashinaError("unexpected rerank response") from exc
+        if any(type(i) is not int or not 0 <= i < len(documents) for i in ids):
+            raise SarashinaError("unexpected rerank response: invalid document_id")
+        return ids
 
     async def _post(self, path: str, body: dict) -> httpx.Response:
         try:

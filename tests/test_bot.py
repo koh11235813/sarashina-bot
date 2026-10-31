@@ -1,9 +1,17 @@
+import asyncio
 import json
 import logging
+import threading
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
+import discord
+import pytest
+
+import sarashina_bot.bot as bot_module
 from sarashina_bot.bot import (
     RUN_COMMAND_TOOL,
+    SarashinaBot,
     WEB_SEARCH_TOOL,
     HistoryMessage,
     _reply_to_author_id,
@@ -16,6 +24,7 @@ from sarashina_bot.bot import (
     split_message,
 )
 from sarashina_bot.config import Config
+from sarashina_bot.paper import PaperError, PaperIndex, Paragraph, format_paragraph
 from sarashina_bot.exa import ExaError
 from sarashina_bot.sarashina import (
     REASONING_EFFORT_MODEL,
@@ -682,12 +691,15 @@ async def test_translate_command_failure_hides_details():
     assert chunks == ["翻訳に失敗しました。"]
 
 
-async def test_translate_command_unexpected_error_is_a_failure():
+async def test_translate_command_unexpected_error_is_a_failure(caplog):
     translator = FakeTranslator(error=RuntimeError("boom"))
 
     chunks = await handle_translate_command(translator, CONFIG, 42, "ja", "x")
 
     assert chunks == ["翻訳に失敗しました。"]
+    record = caplog.records[-1]
+    assert record.getMessage() == "failed to translate"
+    assert record.exc_info[0] is RuntimeError
 
 
 async def test_translate_command_empty_translation_is_a_failure():
@@ -708,3 +720,423 @@ async def test_translate_command_logs_length_without_text(caplog):
     assert "translate: source=ja chars=9" in logged
     assert "secret-in" not in logged
     assert "secret-out" not in logged
+
+
+class Typing:
+    async def __aenter__(self):
+        pass
+
+    async def __aexit__(self, *args):
+        pass
+
+
+def channel_fake(kind=discord.Thread, *, owner_id=BOT_ID):
+    channel = MagicMock(spec=kind)
+    channel.id = 200
+    if kind is discord.Thread:
+        channel.owner_id = owner_id
+    channel.sent = []
+
+    async def send(content, **kwargs):
+        channel.sent.append((content, kwargs))
+
+    channel.send = send
+    channel.typing = Typing
+    channel.history.side_effect = AssertionError("paper threads must not read history")
+    return channel
+
+
+class Message:
+    def __init__(self, channel, content, *, author_id=1, author_bot=False, mentioned=False):
+        self.id = 300
+        self.channel = channel
+        self.content = self.clean_content = content
+        self.author = SimpleNamespace(id=author_id, bot=author_bot, display_name="reader")
+        self.mentioned = mentioned
+        self.reference = None
+        self.replies = []
+        self.thread_names = []
+
+    async def reply(self, content, **kwargs):
+        self.replies.append((content, kwargs))
+
+    async def create_thread(self, *, name):
+        self.thread_names.append(name)
+        return self.created_thread
+
+
+def bot_fake(sarashina=None, *, allowed_user_ids=frozenset({1})):
+    config = Config(discord_token="", api_key="", exa_api_key="", allowed_user_ids=allowed_user_ids)
+    bot = SarashinaBot(config, sarashina or FakeSarashina(), FakeExa(), FakeTerminal())
+    bot._connection.user = SimpleNamespace(id=BOT_ID, mentioned_in=lambda m: m.mentioned)
+    return bot
+
+
+def assert_safe_send(kwargs):
+    assert kwargs["suppress_embeds"] is True
+    assert kwargs["allowed_mentions"].to_dict() == discord.AllowedMentions.none().to_dict()
+
+
+async def test_url_creates_thread_and_posts_paragraphs_in_order(monkeypatch):
+    bot = bot_fake()
+    thread = channel_fake()
+    message = Message(channel_fake(discord.TextChannel), "https://arxiv.org/abs/1706.03762v2")
+    message.created_thread = thread
+    paragraphs = [Paragraph(1, "An example with @everyone inside."), Paragraph(2, "The second paragraph from the paper.")]
+    index = PaperIndex(paragraphs, [[1.0], [2.0]])
+    steps = []
+    loop_thread = threading.get_ident()
+
+    async def download(arxiv_id):
+        assert arxiv_id == "1706.03762v2"
+        steps.append("download")
+        return b"pdf"
+
+    def extract(pdf):
+        assert pdf == b"pdf"
+        assert threading.get_ident() != loop_thread
+        steps.append("extract")
+        return paragraphs
+
+    async def build(client, extracted):
+        assert client is bot._sarashina and extracted is paragraphs
+        steps.append("index")
+        return index
+
+    monkeypatch.setattr(bot_module, "download_pdf", download)
+    monkeypatch.setattr(bot_module, "extract_paragraphs", extract)
+    monkeypatch.setattr(bot_module, "build_index", build)
+    await bot.on_message(message)
+    assert message.thread_names == ["arXiv:1706.03762v2"]
+    assert bot._papers[thread.id] is None
+    assert len(bot._ingest_tasks) == 1
+    await asyncio.gather(*bot._ingest_tasks)
+    assert not bot._ingest_tasks
+    assert steps == ["download", "extract", "index"]
+    assert bot._papers[thread.id] is index
+    assert len(thread.sent) == 5
+    assert "読み込んでいます" in thread.sent[0][0]
+    assert "準備できました" in thread.sent[1][0]
+    assert "ここに書いたメッセージには論文の内容から答えます。" in thread.sent[1][0]
+    assert "右クリック（モバイルでは長押し）→ アプリ → 日本語に翻訳" in thread.sent[1][0]
+    assert [text for text, _ in thread.sent[2:4]] == [format_paragraph(p) for p in paragraphs]
+    assert "全段落" in thread.sent[-1][0]
+    for _, kwargs in thread.sent:
+        assert_safe_send(kwargs)
+
+
+def interaction_fake(user_id=1):
+    return SimpleNamespace(
+        user=SimpleNamespace(id=user_id),
+        response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+
+def test_paragraph_translation_menu_is_registered():
+    menu = bot_fake().tree.get_command("日本語に翻訳", type=discord.AppCommandType.message)
+    assert isinstance(menu, discord.app_commands.ContextMenu)
+    assert menu.name == "日本語に翻訳"
+    assert menu.type is discord.AppCommandType.message
+
+
+async def test_paragraph_translation_menu_defers_publicly_without_index_after_restart():
+    translator = FakeTranslator("日本語訳です。")
+    bot = bot_fake(translator)
+    thread = channel_fake()
+    message = Message(thread, "p.3\nAn English paragraph.", author_id=BOT_ID, author_bot=True)
+    interaction = interaction_fake()
+    menu = bot.tree.get_command("日本語に翻訳", type=discord.AppCommandType.message)
+    assert not bot._papers
+    await menu.callback(interaction, message)
+    assert translator.calls == [("An English paragraph.", "en", "ja")]
+    interaction.response.defer.assert_awaited_once_with()
+    interaction.response.send_message.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once()
+    sent = interaction.followup.send.await_args
+    assert sent.args == ("日本語訳です。",)
+    assert not sent.kwargs.get("ephemeral", False)
+    assert_safe_send(sent.kwargs)
+    thread.history.assert_not_called()
+    thread.fetch_message.assert_not_called()
+
+
+@pytest.mark.parametrize("target_content, author_id", [("status", BOT_ID), ("p.3\nA forged paragraph.", 1)])
+async def test_paragraph_translation_menu_rejects_invalid_target(target_content, author_id):
+    translator = FakeTranslator("日本語訳です。")
+    bot = bot_fake(translator)
+    thread = channel_fake()
+    message = Message(thread, target_content, author_id=author_id)
+    interaction = interaction_fake()
+    menu = bot.tree.get_command("日本語に翻訳", type=discord.AppCommandType.message)
+    await menu.callback(interaction, message)
+    assert translator.calls == []
+    interaction.response.send_message.assert_awaited_once_with(
+        "bot が投稿した段落のメッセージで使ってください。", ephemeral=True
+    )
+    interaction.response.defer.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("state, expected", [("building", "まだ索引"), ("lost", "もう一度 URL")])
+async def test_question_while_building_or_after_state_lost(state, expected):
+    bot = bot_fake()
+    thread = channel_fake()
+    if state == "building":
+        bot._papers[thread.id] = None
+    message = Message(thread, "この論文の内容は？")
+    await bot.on_message(message)
+    assert expected in message.replies[0][0]
+    assert_safe_send(message.replies[0][1])
+    thread.history.assert_not_called()
+
+
+async def test_question_after_index_ready_uses_original_question(monkeypatch):
+    bot = bot_fake()
+    thread = channel_fake()
+    index = PaperIndex([], [])
+    bot._papers[thread.id] = index
+    question = "  <@999> の質問です。  "
+
+    async def answer(client, actual_index, text):
+        assert client is bot._sarashina
+        assert actual_index is index
+        assert text == question
+        return "回答です。\n参考: p.3"
+
+    monkeypatch.setattr(bot_module, "answer", answer)
+    message = Message(thread, question)
+    await bot.on_message(message)
+    assert message.replies[0][0] == "回答です。\n参考: p.3"
+    thread.history.assert_not_called()
+
+
+async def test_ready_index_can_answer_while_paragraphs_are_being_posted(monkeypatch):
+    bot = bot_fake()
+    thread = channel_fake()
+    paragraph_started = asyncio.Event()
+    resume = asyncio.Event()
+    paragraphs = [Paragraph(1, "This paragraph is still being posted.")]
+    index = PaperIndex(paragraphs, [[1.0]])
+    original_send = thread.send
+
+    async def send(content, **kwargs):
+        if content.startswith("p.1\n"):
+            paragraph_started.set()
+            await resume.wait()
+        await original_send(content, **kwargs)
+
+    async def download(arxiv_id):
+        return b"pdf"
+
+    async def build(client, paragraphs):
+        return index
+
+    async def answer(client, actual_index, question):
+        assert actual_index is index
+        return "送信中でも回答できます。"
+
+    thread.send = send
+    monkeypatch.setattr(bot_module, "download_pdf", download)
+    monkeypatch.setattr(bot_module, "extract_paragraphs", lambda pdf: paragraphs)
+    monkeypatch.setattr(bot_module, "build_index", build)
+    monkeypatch.setattr(bot_module, "answer", answer)
+    message = Message(channel_fake(discord.TextChannel), "https://arxiv.org/pdf/1706.03762")
+    message.created_thread = thread
+    await bot.on_message(message)
+    try:
+        await asyncio.wait_for(paragraph_started.wait(), timeout=1)
+        question = Message(thread, "どんな結果？")
+        await bot.on_message(question)
+        assert question.replies[0][0] == "送信中でも回答できます。"
+        assert bot._ingest_tasks
+    finally:
+        resume.set()
+        await asyncio.gather(*bot._ingest_tasks)
+
+
+async def test_another_bot_in_owned_thread_is_ignored_even_when_mentioning():
+    bot = bot_fake()
+    thread = channel_fake()
+    message = Message(thread, "<@100> hello", author_id=999, author_bot=True, mentioned=True)
+    await bot.on_message(message)
+    assert not message.replies
+    thread.history.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", [discord.TextChannel, discord.Thread])
+async def test_existing_mention_path_in_other_channels_and_threads(kind):
+    bot = bot_fake(FakeSarashina(text("hello")))
+    channel = channel_fake(kind, owner_id=999)
+    message = Message(channel, "<@100> hi", mentioned=True)
+
+    async def history(*, limit):
+        assert limit == bot._config.context_message_count
+        yield message
+
+    channel.history = history
+    await bot.on_message(message)
+    assert message.replies[0][0] == "hello"
+    assert_safe_send(message.replies[0][1])
+    assert not bot._papers
+
+
+async def test_paper_ingestion_failure_is_logged_and_returns_short_apology(monkeypatch, caplog):
+    bot = bot_fake()
+    thread = channel_fake()
+    bot._papers[thread.id] = None
+
+    async def download(arxiv_id):
+        raise PaperError("offline failure")
+
+    monkeypatch.setattr(bot_module, "download_pdf", download)
+    await bot._ingest_paper(thread, "1706.03762")
+    assert thread.id not in bot._papers
+    assert "PaperError" in caplog.text
+    assert "offline failure" not in caplog.text
+    assert "ごめんなさい" in thread.sent[-1][0]
+    assert "Traceback" not in thread.sent[-1][0]
+
+
+async def test_paper_thread_creation_failure_logs_fixed_message_with_traceback(caplog):
+    bot = bot_fake()
+    message = Message(channel_fake(discord.TextChannel), "https://arxiv.org/abs/1706.03762")
+    error = discord.HTTPException(SimpleNamespace(status=500, reason="Server error"), "failed")
+    message.create_thread = AsyncMock(side_effect=error)
+    await bot._start_paper(message, "1706.03762")
+    assert message.replies[0][0] == "ごめんなさい、スレッドを作れませんでした。"
+    assert not bot._papers
+    assert not bot._ingest_tasks
+    record = caplog.records[-1]
+    assert record.getMessage() == "failed to create paper thread"
+    assert record.exc_info[0] is discord.HTTPException
+
+
+async def test_paper_ingestion_unexpected_failure_logs_fixed_message_with_traceback(monkeypatch, caplog):
+    bot = bot_fake()
+    thread = channel_fake()
+    bot._papers[thread.id] = None
+    monkeypatch.setattr(bot_module, "download_pdf", AsyncMock(side_effect=RuntimeError("failed")))
+    await bot._ingest_paper(thread, "1706.03762")
+    assert thread.id not in bot._papers
+    assert thread.sent[-1][0] == "ごめんなさい、途中で失敗しました。"
+    record = caplog.records[-1]
+    assert record.getMessage() == "failed to ingest paper"
+    assert record.exc_info[0] is RuntimeError
+
+
+async def test_paragraph_translation_menu_denies_non_allowed_user():
+    translator = FakeTranslator("日本語訳です。")
+    bot = bot_fake(translator)
+    thread = channel_fake()
+    message = Message(thread, "p.3\nAn English paragraph.", author_id=BOT_ID, author_bot=True)
+    interaction = interaction_fake(user_id=2)
+    menu = bot.tree.get_command("日本語に翻訳", type=discord.AppCommandType.message)
+    await menu.callback(interaction, message)
+    assert translator.calls == []
+    interaction.response.send_message.assert_awaited_once_with(
+        "翻訳する権限がありません。", ephemeral=True
+    )
+    interaction.response.defer.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("result, error, expected", [
+    ("", None, "翻訳に失敗しました。"),
+    ("", SarashinaError("failed"), "翻訳に失敗しました。"),
+    ("", RateLimitExceeded("limited", retry_after=12, status=429), "12秒後にもう一度送信してください。"),
+])
+async def test_paragraph_translation_menu_uses_command_failure_handling(result, error, expected):
+    translator = FakeTranslator(result, error)
+    bot = bot_fake(translator)
+    thread = channel_fake()
+    message = Message(thread, "p.3\nAn English paragraph.", author_id=BOT_ID, author_bot=True)
+    interaction = interaction_fake()
+    menu = bot.tree.get_command("日本語に翻訳", type=discord.AppCommandType.message)
+    await menu.callback(interaction, message)
+    interaction.response.defer.assert_awaited_once_with()
+    interaction.followup.send.assert_awaited_once()
+    sent = interaction.followup.send.await_args
+    assert sent.args == (expected,)
+    assert_safe_send(sent.kwargs)
+
+
+async def test_paragraph_translation_menu_sends_all_chunks_publicly():
+    translator = FakeTranslator("訳" * 2001)
+    bot = bot_fake(translator)
+    thread = channel_fake()
+    message = Message(thread, "p.3\nAn English paragraph.", author_id=BOT_ID, author_bot=True)
+    interaction = interaction_fake()
+    menu = bot.tree.get_command("日本語に翻訳", type=discord.AppCommandType.message)
+    await menu.callback(interaction, message)
+    interaction.response.defer.assert_awaited_once_with()
+    assert [call.args for call in interaction.followup.send.await_args_list] == [("訳" * 2000,), ("訳",)]
+    for call in interaction.followup.send.await_args_list:
+        assert not call.kwargs.get("ephemeral", False)
+        assert_safe_send(call.kwargs)
+
+
+async def test_rate_limited_paper_question_returns_retry_message(monkeypatch):
+    bot = bot_fake(allowed_user_ids=frozenset())
+    thread = channel_fake()
+    bot._papers[thread.id] = PaperIndex([], [])
+
+    async def limited(*args):
+        raise RateLimitExceeded("limited", retry_after=17, status=429)
+
+    monkeypatch.setattr(bot_module, "answer", limited)
+    message = Message(thread, "質問です")
+    await bot.on_message(message)
+    assert message.replies[0][0] == "17秒後にもう一度送信してください。"
+    assert_safe_send(message.replies[0][1])
+    thread.history.assert_not_called()
+
+
+@pytest.mark.parametrize("question", ["翻訳", "/translate", "translate", " TRANSLATE \n", " /TRANSLATE ", "<@100> /translate", "ここは何を意味しますか？"])
+async def test_any_reply_text_is_an_open_rag_question(monkeypatch, question):
+    bot = bot_fake(allowed_user_ids=frozenset())
+    thread = channel_fake()
+    index = PaperIndex([], [])
+    bot._papers[thread.id] = index
+    message = Message(thread, question, author_id=2)
+    message.reference = SimpleNamespace(message_id=400)
+
+    async def answer(client, actual_index, question):
+        assert actual_index is index
+        assert question == message.content
+        return "回答です。"
+
+    monkeypatch.setattr(bot_module, "answer", answer)
+    await bot.on_message(message)
+    assert message.replies[0][0] == "回答です。"
+    thread.fetch_message.assert_not_called()
+    thread.history.assert_not_called()
+
+
+async def test_paper_question_failure_logs_fixed_message_with_traceback(monkeypatch, caplog):
+    bot = bot_fake()
+    thread = channel_fake()
+    bot._papers[thread.id] = PaperIndex([], [])
+
+    async def fail(*args):
+        raise SarashinaError("API failure")
+
+    monkeypatch.setattr(bot_module, "answer", fail)
+    message = Message(thread, "private question")
+    await bot.on_message(message)
+    assert message.replies[0][0] == "ごめんなさい、返信に失敗しました。"
+    record = caplog.records[-1]
+    assert record.getMessage() == "failed to handle message in paper thread"
+    assert record.exc_info[0] is SarashinaError
+
+
+async def test_translate_slash_command_keeps_required_args_and_denial():
+    bot = bot_fake()
+    command = bot.tree.get_command("translate")
+    assert [(p.name, p.required) for p in command.parameters] == [("source", True), ("text", True)]
+    interaction = SimpleNamespace(user=SimpleNamespace(id=2), response=SimpleNamespace(
+        send_message=AsyncMock(), defer=AsyncMock(),
+    ))
+    await command.callback(interaction, "en", "text")
+    interaction.response.send_message.assert_awaited_once_with("翻訳する権限がありません。", ephemeral=True)
+    interaction.response.defer.assert_not_awaited()

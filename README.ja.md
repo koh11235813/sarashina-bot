@@ -10,6 +10,13 @@
 - `/effort level` では `reasoning_effort`（`low` / `medium` / `high`）を指定できます。受け付けるのは `sarashina3.2-mini-thinking` だけなので、ほかのモデルのときは断り、送るのもこのモデルを選んでいるあいだだけです。指定は `/model` で切り替えても残ります。考えているうちに出力の上限を使い切って回答が空になったときは、「回答が出せませんでした。effort を下げてください。」と返します。
 - 同じ人は `/translate source text` で、Sarashina の翻訳 API を使って日本語と英語を翻訳できます。`source` に `ja` か `en` を選ぶと、もう一方の言語に訳します。`text` は 5,000 文字までです。返事は全員に見え、中身は訳文だけです（2,000 文字を超えたら分けて送ります）。失敗したときは「翻訳に失敗しました。」と返します。翻訳は会話の文脈には入りません。
 
+- テキストチャンネルに arXiv URL を貼ると、メンションなしで `arXiv:{id}` スレッドを作ります。
+  索引ができると 1 段落ずつ投稿し、その途中でもスレッドに質問すれば論文の抜粋をもとに答えます。
+  空でないメッセージは返信も含めてすべて質問として扱い、誰でも送れます。ターミナルのツールは使いません。
+  `DISCORD_ALLOWED_USERS` の人は bot の段落を右クリック（モバイルでは長押し）→ アプリ → 日本語に翻訳で選ぶと、全員に見える日本語訳を受け取れます。
+  スラッシュコマンドは返信先のメッセージを受け取れず、返信中に `/translate` を入力しても登録済みコマンドが開くため、段落翻訳には専用のメッセージコンテキストメニューを使います。
+  段落翻訳は再起動後も使えます。質問に使う索引はメモリ上だけにあるので、再起動後に質問を再開するには URL をもう一度貼ってください。
+
 設計の詳細や Sarashina API のクセは [SPEC.md](SPEC.md) にまとめてあります。
 
 ## 構成
@@ -44,7 +51,7 @@
 | `DISCORD_TOKEN` | ○ | | Discord bot のトークン |
 | `SARASHINA_API_KEY` | ○ | | Sarashina の API キー |
 | `EXA_API_KEY` | ○ | | `web_search` に使う Exa の API キー |
-| `DISCORD_ALLOWED_USERS` | | 空 | `run_command`・`/model`・`/effort`・`/translate` を使える Discord ユーザー ID（カンマ区切り） |
+| `DISCORD_ALLOWED_USERS` | | 空 | `run_command`・`/model`・`/effort`・`/translate` とメッセージコンテキストメニュー「日本語に翻訳」を使える Discord ユーザー ID（カンマ区切り） |
 | `SARASHINA_MODEL` | | `sarashina3-mini` | 起動時のモデル。`SARASHINA_MODELS` に入っていないと起動しない |
 | `SARASHINA_MODELS` | | `SARASHINA_MODEL` の値 | `/model` の選択肢（カンマ区切り） |
 | `SANDBOX_URL` | | `http://sandbox:8080` | サンドボックスのベース URL |

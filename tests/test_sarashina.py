@@ -443,3 +443,207 @@ async def test_translate_does_not_log_text(caplog):
     logged = "\n".join(r.getMessage() for r in caplog.records)
     assert "secret-in" not in logged
     assert "secret-out" not in logged
+
+
+async def test_embed_body_and_result():
+    captured = {}
+
+    def handler(request):
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2]}]})
+
+    client = make_client(handler)
+    assert await client.embed("text", "RETRIEVAL_QUERY") == [0.1, 0.2]
+    assert captured == {
+        "path": "/v1/embeddings",
+        "body": {"input": "text", "task_type": "RETRIEVAL_QUERY", "model": "sarashina3-embedding"},
+    }
+
+
+async def test_rerank_body_and_ids_in_response_order():
+    captured = {}
+
+    def handler(request):
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": [{"result": [
+            {"document_id": 2, "score": 0.1}, {"document_id": 0, "score": 0.9},
+        ]}]})
+
+    client = make_client(handler)
+    assert await client.rerank("q", ["a", "b", "c"]) == [2, 0]
+    assert captured == {
+        "path": "/v1/rerank",
+        "body": {"query": "q", "documents": ["a", "b", "c"], "task_type": "GENERAL_QA", "model": "sarashina3-rerank"},
+    }
+
+
+@pytest.mark.parametrize("endpoint", ["embed", "rerank"])
+async def test_paper_endpoint_429_is_not_retried(endpoint):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(429, headers={"Retry-After": "17"})
+
+    client = make_client(handler)
+    with pytest.raises(RateLimitExceeded) as caught:
+        if endpoint == "embed":
+            await client.embed("text", "RETRIEVAL_QUERY")
+        else:
+            await client.rerank("q", ["text"])
+    assert caught.value.status == 429
+    assert caught.value.retry_after == 17
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("endpoint, payload", [
+    ("embed", {}), ("embed", {"data": []}), ("embed", {"data": [None]}),
+    ("embed", {"data": [{"embedding": "private-text"}]}),
+    ("embed", {"data": [{"embedding": [True]}]}),
+    ("embed", {"data": [{"embedding": []}]}),
+    ("rerank", {}), ("rerank", {"data": []}),
+    ("rerank", {"data": [{"result": {}}]}),
+    ("rerank", {"data": [{"result": [{"document_id": "0"}]}]}),
+    ("rerank", {"data": [{"result": [{"document_id": -1}]}]}),
+    ("rerank", {"data": [{"result": [{"document_id": 1}]}]}),
+    ("rerank", {"data": [{"result": [{"document_id": True}]}]}),
+])
+async def test_paper_endpoint_unexpected_shape_is_sarashina_error(endpoint, payload):
+    client = make_client(lambda request: httpx.Response(200, json=payload))
+    with pytest.raises(SarashinaError):
+        if endpoint == "embed":
+            await client.embed("text", "RETRIEVAL_QUERY")
+        else:
+            await client.rerank("q", ["text"])
+
+
+@pytest.mark.parametrize("endpoint", ["embed", "rerank"])
+async def test_paper_endpoint_bad_json_is_sarashina_error(endpoint):
+    client = make_client(lambda request: httpx.Response(200, text="not json"))
+    with pytest.raises(SarashinaError):
+        if endpoint == "embed":
+            await client.embed("text", "RETRIEVAL_QUERY")
+        else:
+            await client.rerank("q", ["text"])
+
+
+async def test_embed_waits_at_default_55_rpm_and_uses_no_chat_or_translate_slots(monkeypatch):
+    now = [0.0]
+    sleeps = []
+
+    async def sleep(delay):
+        sleeps.append(delay)
+        now[0] += delay
+
+    monkeypatch.setattr("sarashina_bot.sarashina.asyncio.sleep", sleep)
+
+    def handler(request):
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return by_path(request)
+
+    client = make_client(handler, rpm=1, clock=lambda: now[0])
+    for _ in range(55):
+        await client.embed("text", "RETRIEVAL_QUERY")
+    assert sleeps == []
+    await client.chat([{"role": "user", "content": "text"}])
+    await client.translate("text", "en", "ja")
+    await client.embed("text", "RETRIEVAL_QUERY")
+    assert sleeps == [60]
+
+
+async def test_rerank_does_not_wait_or_use_chat_or_translate_slots():
+    def handler(request):
+        if request.url.path.endswith("/rerank"):
+            return httpx.Response(200, json={"data": [{"result": []}]})
+        return by_path(request)
+
+    client = make_client(handler, rpm=1, clock=lambda: 0.0)
+    await client.chat([{"role": "user", "content": "text"}])
+    await client.translate("text", "en", "ja")
+    for _ in range(100):
+        assert await client.rerank("q", ["text"]) == []
+
+
+async def test_wait_does_not_hold_lock_or_change_acquire_fail_fast(monkeypatch):
+    import asyncio
+    from sarashina_bot.sarashina import _RateLimiter
+
+    now = [0.0]
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def sleep(delay):
+        started.set()
+        await release.wait()
+        now[0] += delay
+
+    monkeypatch.setattr("sarashina_bot.sarashina.asyncio.sleep", sleep)
+    limiter = _RateLimiter(1, clock=lambda: now[0])
+    await limiter.acquire()
+    waiter = asyncio.create_task(limiter.wait())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        with pytest.raises(RateLimitExceeded):
+            await asyncio.wait_for(limiter.acquire(), timeout=1)
+    finally:
+        release.set()
+        await asyncio.wait_for(waiter, timeout=1)
+
+
+async def test_concurrent_waiters_do_not_exceed_rpm(monkeypatch):
+    import asyncio
+    from sarashina_bot.sarashina import _RateLimiter
+
+    now = [0.0]
+    sleepers = []
+    original_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        assert delay > 0
+        wake = asyncio.get_running_loop().create_future()
+        sleepers.append(wake)
+        await wake
+
+    monkeypatch.setattr("sarashina_bot.sarashina.asyncio.sleep", sleep)
+    limiter = _RateLimiter(2, clock=lambda: now[0])
+    granted = []
+
+    async def waiter():
+        await limiter.wait()
+        granted.append(now[0])
+
+    tasks = [asyncio.create_task(waiter()) for _ in range(7)]
+    try:
+        await original_sleep(0)
+        assert granted == [0.0, 0.0]
+        assert len(sleepers) == 5
+        for deadline, waiting in [(60.0, 3), (120.0, 1), (180.0, 0)]:
+            now[0] = deadline
+            waking = sleepers[:]
+            sleepers.clear()
+            for wake in waking:
+                wake.set_result(None)
+            await original_sleep(0)
+            assert len(sleepers) == waiting
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+        assert granted == [0.0, 0.0, 60.0, 60.0, 120.0, 120.0, 180.0]
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.parametrize("endpoint", ["embed", "rerank"])
+async def test_paper_endpoint_transport_error_is_sarashina_error(endpoint):
+    def handler(request):
+        raise httpx.ConnectError("offline")
+
+    client = make_client(handler)
+    with pytest.raises(SarashinaError):
+        if endpoint == "embed":
+            await client.embed("text", "RETRIEVAL_QUERY")
+        else:
+            await client.rerank("q", ["text"])
