@@ -10,6 +10,8 @@ A Discord bot that replies to mentions using the [Sarashina](https://api.sarashi
 - `/effort level` lets the same users set `reasoning_effort` (`low` / `medium` / `high`). Only `sarashina3.2-mini-thinking` accepts it, so the command refuses on other models and the bot sends it only while that model is selected; the setting survives `/model` switches. If thinking uses up the output limit and the answer comes back empty, the bot replies 「回答が出せませんでした。effort を下げてください。」.
 - `/translate source text` lets the same users translate between Japanese and English with Sarashina's Translate API. `source` is `ja` or `en` and the target is the other one; `text` is up to 5,000 characters. The reply is public and contains only the translation (split if over 2,000 characters). On failure the bot replies 「翻訳に失敗しました。」. Translations are not part of the conversation context.
 
+- Paste an arXiv URL into a text channel to create an `arXiv:{id}` thread, without a mention. Once the RAG index is ready, the bot posts one paragraph per message. All non-empty messages in the thread, including replies, are questions answered from the paper, even while paragraphs are still being posted; anyone can ask, and no terminal tools are offered. Users in `DISCORD_ALLOWED_USERS` can right-click a bot paragraph (long-press on mobile) → アプリ → 日本語に翻訳 for a public Japanese translation. This dedicated message context menu is used because a slash command cannot receive the replied-to message, and typing `/translate` in a reply opens the registered command. Paragraph translation works after a restart; the RAG index lives in memory, so paste the URL again to resume questions.
+
 Design details and Sarashina API quirks are in [SPEC.md](SPEC.md) (Japanese).
 
 ## Architecture
@@ -44,7 +46,7 @@ All settings are environment variables (see `src/sarashina_bot/config.py`).
 | `DISCORD_TOKEN` | yes | | Discord bot token |
 | `SARASHINA_API_KEY` | yes | | Sarashina API key |
 | `EXA_API_KEY` | yes | | Exa API key for `web_search` |
-| `DISCORD_ALLOWED_USERS` | no | empty | Comma-separated Discord user IDs that get `run_command`, `/model`, `/effort` and `/translate` |
+| `DISCORD_ALLOWED_USERS` | no | empty | Comma-separated Discord user IDs that get `run_command`, `/model`, `/effort`, `/translate` and the 「日本語に翻訳」 message context menu |
 | `SARASHINA_MODEL` | no | `sarashina3-mini` | Model used at startup; must be in `SARASHINA_MODELS` |
 | `SARASHINA_MODELS` | no | value of `SARASHINA_MODEL` | Comma-separated choices for `/model` |
 | `SANDBOX_URL` | no | `http://sandbox:8080` | Base URL of the sandbox |
