@@ -97,3 +97,9 @@ CI (`.github/workflows/ci.yml`) runs the tests and `docker build .` on pull requ
 ## Deployment
 
 The Kubernetes manifests and the deploy script live in the private homelab repo, under [`sarashina-bot/`](https://github.com/koh11235813/homelab/tree/main/sarashina-bot). `sarashina-bot/deploy.sh <path to this clone>` builds the image and rolls it out; see that directory for the steps.
+
+## License
+
+This project is licensed under AGPL-3.0-only, as required by the PyMuPDF dependency. See [LICENSE](LICENSE) for the full text.
+
+Copyright (C) 2026 koh11235813

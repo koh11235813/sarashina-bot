@@ -291,7 +291,13 @@ class SarashinaBot(discord.Client):
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
-        super().__init__(intents=intents)
+        # AGPL section 13: offer source to users interacting with the bot over the network.
+        super().__init__(
+            intents=intents,
+            activity=discord.CustomActivity(
+                name="Source: https://github.com/koh11235813/sarashina-bot"
+            ),
+        )
         self._config = config
         self._sarashina = sarashina
         self._exa = exa

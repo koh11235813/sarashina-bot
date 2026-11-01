@@ -102,3 +102,9 @@ CI（`.github/workflows/ci.yml`）は pull request と `main` への push でテ
 ## デプロイ
 
 Kubernetes のマニフェストとデプロイスクリプトは private の homelab リポジトリの [`sarashina-bot/`](https://github.com/koh11235813/homelab/tree/main/sarashina-bot) に置いています。`sarashina-bot/deploy.sh <この clone のパス>` でイメージをビルドしてロールアウトします。手順はそちらを見てください。
+
+## ライセンス
+
+PyMuPDF に依存しているため、AGPL-3.0-only を採用しています。全文は [LICENSE](LICENSE) を参照してください。
+
+Copyright (C) 2026 koh11235813

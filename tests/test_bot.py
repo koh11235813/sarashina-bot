@@ -772,6 +772,12 @@ def bot_fake(sarashina=None, *, allowed_user_ids=frozenset({1})):
     return bot
 
 
+def test_activity_shows_source_url():
+    activity = bot_fake().activity
+    assert isinstance(activity, discord.CustomActivity)
+    assert activity.name == "Source: https://github.com/koh11235813/sarashina-bot"
+
+
 def assert_safe_send(kwargs):
     assert kwargs["suppress_embeds"] is True
     assert kwargs["allowed_mentions"].to_dict() == discord.AllowedMentions.none().to_dict()
